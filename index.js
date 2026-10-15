@@ -57,13 +57,21 @@ function nullableString(value, label) {
   return value;
 }
 
+function normalizePositiveInt64(raw) {
+  const canonical = raw.replace(/^0+(?=\d)/, "");
+  if (canonical === "0" || canonical.length > MAX_INT64.length ||
+      (canonical.length === MAX_INT64.length && canonical > MAX_INT64)) {
+    return null;
+  }
+  return canonical;
+}
+
 function positiveInt64(value, label) {
   if (!isLosslessNumber(value)) throw new Error(`gh tea JSON contract error: ${label} must be an integer`);
   const raw = value.toString();
   if (!/^[0-9]+$/.test(raw)) throw new Error(`gh tea JSON contract error: ${label} must be a positive integer`);
-  const canonical = raw.replace(/^0+(?=\d)/, "");
-  if (canonical === "0" || canonical.length > MAX_INT64.length ||
-      (canonical.length === MAX_INT64.length && canonical > MAX_INT64)) {
+  const canonical = normalizePositiveInt64(raw);
+  if (canonical === null) {
     throw new Error(`gh tea JSON contract error: ${label} is outside the positive int64 range`);
   }
   return canonical;
@@ -215,9 +223,8 @@ function parseIssueUri(path) {
   const segments = rawSegments.map((segment, index) => decodeSegment(segment, `path segment ${index + 1}`));
   const rawNumber = segments.at(-1);
   if (!/^[0-9]+$/.test(rawNumber)) invalid();
-  const canonical = rawNumber.replace(/^0+(?=\d)/, "");
-  if (canonical === "0" || canonical.length > MAX_INT64.length ||
-      (canonical.length === MAX_INT64.length && canonical > MAX_INT64)) {
+  const canonical = normalizePositiveInt64(rawNumber);
+  if (canonical === null) {
     throw new Error("Invalid teaissue URI: issue number must be in the range 1..9223372036854775807");
   }
 
