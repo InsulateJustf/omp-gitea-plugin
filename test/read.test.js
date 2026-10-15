@@ -199,3 +199,133 @@ test("fails closed when OMP marks a teaissue read result as truncated", () => {
   assert.equal(result.isError, true);
   assert.match(text(result), /truncated by OMP's output limit/);
 });
+test("accepts non-empty use query values as single-decoded aliases", async () => {
+  for (const [queryValue, expected] of [[".", "."], ["..", ".."], ["A%2FB", "A/B"], ["%252F", "%2F"]]) {
+    const { tool, pi } = load();
+    const result = await read(tool, `teaissue://7?use=${queryValue}`);
+    assert.equal(result.isError, undefined, text(result));
+    assert.deepEqual(pi.execArgs[1].slice(0, 7), ["tea", "issue", "view", "7", "--use", expected, "--json"]);
+  }
+});
+
+test("rejects impossible calendar dates and time offsets", async () => {
+  for (const value of [
+    "2026-02-30T08:00:00Z",
+    "2025-02-29T08:00:00Z",
+    "2026-01-01T24:00:00Z",
+    "2026-01-01T08:60:00Z",
+    "2026-01-01T08:00:00+24:00",
+    "2026-01-01T08:00:00+00:60",
+  ]) {
+    const { tool } = load({ stdout: issueJson.replace("2026-10-14T08:00:00Z", value) });
+    const result = await read(tool, "teaissue://7");
+    assert.equal(result.isError, true, value);
+    assert.match(text(result), /RFC3339/, value);
+  }
+});
+
+test("reports backend contract errors as requiring compatible gh-tea", async () => {
+  for (const path of ["teaissue://7", "teaissue://7?comments=0"]) {
+    const { tool } = load({ stdout: issueJson.replace(",\n  \"isPullRequest\": false", "") });
+    const result = await read(tool, path);
+    assert.equal(result.isError, true);
+    assert.match(text(result), /gh-tea.*0\.6\.0/i);
+  }
+});
+
+test("preserves nonzero exit diagnostics and identifies the required backend", async () => {
+  const { tool } = load({ code: 1, stderr: "permission denied" });
+  const result = await read(tool, "teaissue://7");
+  assert.equal(result.isError, true);
+  assert.match(text(result), /exited with code 1/);
+  assert.match(text(result), /permission denied/);
+  assert.match(text(result), /gh-tea.*0\.6\.0/i);
+});
+test("rejects trailing JSON, arrays, and malformed or mistyped PR fields", async (t) => {
+  const cases = [
+    ["trailing garbage", `${issueJson} trailing`],
+    ["second top-level value", `${issueJson} {}`],
+    ["array root", `[${issueJson}]`],
+    ["missing PR field with comments", issueJson.replace('  "isPullRequest": false,\n', "")],
+    ["missing PR field without comments", issueJson.replace('  "isPullRequest": false,\n', "").replace(/,\n  "comments": \[[\s\S]*?\]/, "")],
+    ["string PR field", issueJson.replace('"isPullRequest": false', '"isPullRequest": "false"')],
+    ["null PR field", issueJson.replace('"isPullRequest": false', '"isPullRequest": null')],
+  ];
+  for (const [name, stdout] of cases) {
+    await t.test(name, async () => {
+      for (const uri of ["teaissue://7", "teaissue://7?comments=0"]) {
+        const { tool } = load({ stdout });
+        const result = await read(tool, uri);
+        assert.equal(result.isError, true);
+        assert.match(text(result), /gh tea JSON contract error/);
+        assert.doesNotMatch(text(result), /Issue title|Comment body/);
+      }
+    });
+  }
+});
+
+test("uses each call's current cwd and fresh backend response without caching", async () => {
+  let calls = 0;
+  let registered;
+  const pi = {
+    zod: { object: (shape) => shape, string: () => ({}) },
+    on() {},
+    registerTool(tool) { registered = tool; },
+    async exec(command, args, options) {
+      calls++;
+      assert.equal(command, "gh");
+      assert.deepEqual(args.slice(0, 4), ["tea", "issue", "view", "7"]);
+      return {
+        stdout: issueJson.replace('"Issue title"', `"Issue from ${options.cwd}"`),
+        code: 0,
+        killed: false,
+        stderr: "",
+      };
+    },
+  };
+  extension(pi);
+  const first = await read(registered, "teaissue://7", { cwd: "/repo/one" });
+  const second = await read(registered, "teaissue://7", { cwd: "/repo/two" });
+  assert.equal(calls, 2);
+  assert.match(text(first), /Issue from \/repo\/one/);
+  assert.match(text(second), /Issue from \/repo\/two/);
+});
+
+test("passes non-teaissue paths to native read unchanged", async () => {
+  const { tool } = load();
+  const params = { path: "https://example.test/teaissue://ordinary" };
+  const marker = { content: [{ type: "text", text: "native" }] };
+  const result = await read(tool, params.path, {
+    cwd: "/work/repo",
+    invokeTool(received) {
+      assert.deepEqual(received, params);
+      return marker;
+    },
+  });
+  assert.equal(result, marker);
+});
+test("renders requested comments in source order with missing metadata explicit", async () => {
+  const comments = [
+    { id: "9223372036854775807", author: null, body: "", createdAt: null, updatedAt: null, url: null },
+    { id: 12, author: { login: "bob" }, body: "second source comment", createdAt: "2026-10-14T10:00:00Z", updatedAt: null, url: null },
+    { id: 13, author: null, body: "third source comment", createdAt: null, updatedAt: null, url: null },
+  ];
+  const stdout = issueJson.replace(/"comments": \[[\s\S]*?\]/, `"comments": ${JSON.stringify(comments).replace('"id":"9223372036854775807"', '"id":9223372036854775807')}`);
+  const { tool } = load({ stdout });
+  const result = await read(tool, "teaissue://7");
+  assert.equal(result.isError, undefined, text(result));
+  const output = text(result);
+  assert.match(output, /Comment 9223372036854775807/);
+  assert.match(output, /Comment 9223372036854775807\n- Author: Missing\n- Created: Missing\n- Updated: Missing\n- URL: Missing\n\n\n/);
+  assert.ok(output.indexOf("Comment 9223372036854775807") < output.indexOf("second source comment"));
+  assert.ok(output.indexOf("second source comment") < output.indexOf("third source comment"));
+});
+
+test("rejects malformed requested comments without returning the issue body", async () => {
+  const stdout = issueJson.replace(/"comments": \[[\s\S]*?\]/, '"comments": {"partial":true}');
+  const { tool } = load({ stdout });
+  const result = await read(tool, "teaissue://7");
+  assert.equal(result.isError, true);
+  assert.match(text(result), /comments must be an array/);
+  assert.doesNotMatch(text(result), /Issue body|Comment body/);
+});
