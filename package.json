@@ -1,0 +1,19 @@
+{
+  "name": "omp-gitea-issue-read",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read Gitea issues through the native read tool in OMP agent sessions",
+  "omp": {
+    "extensions": ["./index.js"]
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "lossless-json": "^4.3.1"
+  }
+}
