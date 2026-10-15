@@ -329,3 +329,17 @@ test("rejects malformed requested comments without returning the issue body", as
   assert.match(text(result), /comments must be an array/);
   assert.doesNotMatch(text(result), /Issue body|Comment body/);
 });
+test("keeps gh-tea selection and authentication diagnostics verbatim", async () => {
+  for (const stderr of [
+    "unknown gh-tea instance alias",
+    "cannot resolve repository from this working directory",
+    "issue not found",
+    "authentication required",
+  ]) {
+    const { tool } = load({ code: 1, stderr });
+    const result = await read(tool, "teaissue://Owner/Repo/7?use=missing");
+    assert.equal(result.isError, true);
+    assert.match(text(result), new RegExp(stderr));
+    assert.match(text(result), /gh-tea.*0\.6\.0/i);
+  }
+});
