@@ -2,7 +2,29 @@ import { isLosslessNumber, parse } from "lossless-json";
 
 const MAX_INT64 = "9223372036854775807";
 const ISSUE_FIELDS = "number,title,state,url,createdAt,updatedAt,closedAt,author.login,labels[].name,assignees[].login,milestone.title,body,isPullRequest";
-const TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const TIME_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|([+-])(\d{2}):(\d{2}))$/;
+
+function isRfc3339(value) {
+  const match = TIME_RE.exec(value);
+  if (!match) return false;
+  const [, year, month, day, hour, minute, second, , , offsetHour, offsetMinute] = match;
+  const y = Number(year);
+  const m = Number(month);
+  const d = Number(day);
+  const h = Number(hour);
+  const min = Number(minute);
+  const sec = Number(second);
+  const oh = offsetHour === undefined ? 0 : Number(offsetHour);
+  const om = offsetMinute === undefined ? 0 : Number(offsetMinute);
+  const leapYear = y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0);
+  const monthDays = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return m >= 1 && m <= 12 && d >= 1 && d <= monthDays[m - 1] &&
+    h <= 23 && min <= 59 && sec <= 59 && oh <= 23 && om <= 59;
+}
+
+function compatibleBackendHint(message) {
+  return `${message}\nThis JSON contract requires gh and gh-tea v0.6.0 or newer; install or upgrade the gh-tea extension.`;
+}
 
 function toolError(message) {
   return { content: [{ type: "text", text: message }], isError: true };
@@ -29,7 +51,7 @@ function nullableString(value, label) {
   if (value !== null && typeof value !== "string") {
     throw new Error(`gh tea JSON contract error: ${label} must be a string or null`);
   }
-  if (typeof value === "string" && !TIME_RE.test(value)) {
+  if (typeof value === "string" && !isRfc3339(value)) {
     throw new Error(`gh tea JSON contract error: ${label} must be RFC3339 or null`);
   }
   return value;
@@ -168,6 +190,17 @@ function decodeSegment(segment, label) {
   return decoded;
 }
 
+function decodeQueryValue(value, label) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new Error(`Invalid teaissue URI: malformed encoding in ${label}`);
+  }
+}
+
+function decodeQueryKey(value) {
+  return decodeQueryValue(value, "query parameter");
+}
 function parseIssueUri(path) {
   if (!/^teaissue:/i.test(path)) return null;
   const invalid = () => { throw new Error("Invalid teaissue URI: expected teaissue://<issue number> or teaissue://<owner>/<repo>/<issue number>"); };
@@ -196,11 +229,12 @@ function parseIssueUri(path) {
     for (const pair of queryPart.split("&")) {
       const equals = pair.indexOf("=");
       if (equals <= 0) invalid();
-      const key = decodeSegment(pair.slice(0, equals), "query parameter");
-      const value = decodeSegment(pair.slice(equals + 1), `${key} value`);
+      const key = decodeQueryKey(pair.slice(0, equals));
+      const value = decodeQueryValue(pair.slice(equals + 1), `${key} value`);
       if (key !== "use" && key !== "comments") invalid();
       if (seen.has(key)) throw new Error(`Invalid teaissue URI: repeated ${key} parameter`);
       seen.add(key);
+      if (value === "") throw new Error(`Invalid teaissue URI: empty ${key} value`);
       if (key === "use") use = value;
       else if (value === "0") comments = false;
       else if (value !== "1") throw new Error("Invalid teaissue URI: comments must be 0 or 1");
@@ -276,18 +310,23 @@ export default function teaissueExtension(pi) {
         return toolError(`gh tea issue view was cancelled or timed out${result.stderr ? `: ${result.stderr}` : "."}`);
       }
       if (result.code !== 0) {
-        return toolError(`gh tea issue view exited with code ${result.code}${result.stderr ? `:\n${result.stderr}` : " (no stderr)"}`);
+        return toolError(compatibleBackendHint(
+          `gh tea issue view exited with code ${result.code}${result.stderr ? `:\n${result.stderr}` : " (no stderr)"}`,
+        ));
       }
       let decoded;
       try {
         decoded = parse(result.stdout);
       } catch (error) {
-        return toolError(`gh tea JSON contract error: invalid or incomplete JSON (${error instanceof Error ? error.message : String(error)})`);
+        return toolError(compatibleBackendHint(
+          `gh tea JSON contract error: invalid or incomplete JSON (${error instanceof Error ? error.message : String(error)})`,
+        ));
       }
       try {
         return { content: [{ type: "text", text: renderIssue(validateIssue(decoded, issue.number, issue.comments)) }] };
       } catch (error) {
-        return toolError(error instanceof Error ? error.message : String(error));
+        const message = error instanceof Error ? error.message : String(error);
+        return toolError(message.includes("gh tea JSON contract error") ? compatibleBackendHint(message) : message);
       }
     },
   });

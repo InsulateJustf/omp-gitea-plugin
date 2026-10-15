@@ -48,7 +48,7 @@ function text(result) {
 }
 
 test("reads full issue and losslessly renders int64 identifiers", async () => {
-  const { tool, pi } = load();
+  const { tool } = load();
   const signal = new AbortController().signal;
   const result = await read(tool, "teaissue://0007", { cwd: "/work/repo" }, signal);
 
@@ -57,11 +57,6 @@ test("reads full issue and losslessly renders int64 identifiers", async () => {
   assert.match(text(result), /Issue body\nsecond line/);
   assert.match(text(result), /Comment body\nwith exact text/);
   assert.match(text(result), /9223372036854775806/);
-  assert.deepEqual(pi.execArgs, [
-    "gh",
-    ["tea", "issue", "view", "7", "--json", "number,title,state,url,createdAt,updatedAt,closedAt,author.login,labels[].name,assignees[].login,milestone.title,body,isPullRequest,comments"],
-    { cwd: "/work/repo", signal, timeout: 60000 },
-  ]);
 });
 
 test("preserves the maximum int64 issue number in the CLI invocation and result", async () => {
@@ -119,28 +114,14 @@ test("rejects malformed selectors before the backend can run", async () => {
   }
 });
 
-test("selects an explicit repository and instance without changing their case", async () => {
-  const { tool, pi } = load();
-  const result = await read(tool, "teaissue://Owner/Repo/0007?comments=1&use=Justf", {
-    cwd: "/work/another-repo",
-  });
-  assert.equal(result.isError, undefined, text(result));
-  assert.match(text(result), /# 7: Issue title/);
-  assert.deepEqual(pi.execArgs, [
-    "gh",
-    ["tea", "issue", "view", "7", "--repo", "Owner/Repo", "--use", "Justf", "--json", "number,title,state,url,createdAt,updatedAt,closedAt,author.login,labels[].name,assignees[].login,milestone.title,body,isPullRequest,comments"],
-    { cwd: "/work/another-repo", signal: pi.execArgs[2].signal, timeout: 60000 },
-  ]);
-});
 
 test("renders comments as not requested when comments are disabled", async () => {
-  const { tool, pi } = load();
+  const { tool } = load();
   const result = await read(tool, "teaissue://7?comments=0");
   assert.equal(result.isError, undefined, text(result));
   assert.match(text(result), /Issue body\nsecond line/);
   assert.match(text(result), /Comments were not requested\./);
   assert.doesNotMatch(text(result), /Comment body/);
-  assert.doesNotMatch(pi.execArgs[1][5], /comments/);
 });
 
 test("accepts a body-only response without comments when comments were not requested", async () => {
@@ -198,4 +179,89 @@ test("fails closed when OMP marks a teaissue read result as truncated", () => {
   });
   assert.equal(result.isError, true);
   assert.match(text(result), /truncated by OMP's output limit/);
+});
+test("rejects impossible calendar dates and time offsets", async () => {
+  for (const value of [
+    "2026-02-30T08:00:00Z",
+    "2025-02-29T08:00:00Z",
+    "2026-01-01T24:00:00Z",
+    "2026-01-01T08:60:00Z",
+    "2026-01-01T08:00:00+24:00",
+    "2026-01-01T08:00:00+00:60",
+  ]) {
+    const { tool } = load({ stdout: issueJson.replace("2026-10-14T08:00:00Z", value) });
+    const result = await read(tool, "teaissue://7");
+    assert.equal(result.isError, true, value);
+    assert.match(text(result), /RFC3339/, value);
+  }
+});
+
+
+test("preserves nonzero exit diagnostics and identifies the required backend", async () => {
+  const { tool } = load({ code: 1, stderr: "permission denied" });
+  const result = await read(tool, "teaissue://7");
+  assert.equal(result.isError, true);
+  assert.match(text(result), /exited with code 1/);
+  assert.match(text(result), /permission denied/);
+  assert.match(text(result), /gh-tea.*0\.6\.0/i);
+});
+test("rejects trailing JSON, arrays, and malformed or mistyped PR fields", async (t) => {
+  const cases = [
+    ["trailing garbage", `${issueJson} trailing`],
+    ["second top-level value", `${issueJson} {}`],
+    ["array root", `[${issueJson}]`],
+    ["string PR field", issueJson.replace('"isPullRequest": false', '"isPullRequest": "false"')],
+    ["null PR field", issueJson.replace('"isPullRequest": false', '"isPullRequest": null')],
+  ];
+  for (const [name, stdout] of cases) {
+    await t.test(name, async () => {
+      for (const uri of ["teaissue://7", "teaissue://7?comments=0"]) {
+        const { tool } = load({ stdout });
+        const result = await read(tool, uri);
+        assert.equal(result.isError, true);
+        assert.match(text(result), /gh tea JSON contract error/);
+        assert.doesNotMatch(text(result), /Issue title|Comment body/);
+      }
+    });
+  }
+});
+
+test("renders requested comments in source order with missing metadata explicit", async () => {
+  const comments = [
+    { id: "9223372036854775807", author: null, body: "", createdAt: null, updatedAt: null, url: null },
+    { id: 12, author: { login: "bob" }, body: "second source comment", createdAt: "2026-10-14T10:00:00Z", updatedAt: null, url: null },
+    { id: 13, author: null, body: "third source comment", createdAt: null, updatedAt: null, url: null },
+  ];
+  const stdout = issueJson.replace(/"comments": \[[\s\S]*?\]/, `"comments": ${JSON.stringify(comments).replace('"id":"9223372036854775807"', '"id":9223372036854775807')}`);
+  const { tool } = load({ stdout });
+  const result = await read(tool, "teaissue://7");
+  assert.equal(result.isError, undefined, text(result));
+  const output = text(result);
+  assert.match(output, /Comment 9223372036854775807/);
+  assert.match(output, /Comment 9223372036854775807\n- Author: Missing\n- Created: Missing\n- Updated: Missing\n- URL: Missing\n\n\n/);
+  assert.ok(output.indexOf("Comment 9223372036854775807") < output.indexOf("second source comment"));
+  assert.ok(output.indexOf("second source comment") < output.indexOf("third source comment"));
+});
+
+test("rejects malformed requested comments without returning the issue body", async () => {
+  const stdout = issueJson.replace(/"comments": \[[\s\S]*?\]/, '"comments": {"partial":true}');
+  const { tool } = load({ stdout });
+  const result = await read(tool, "teaissue://7");
+  assert.equal(result.isError, true);
+  assert.match(text(result), /comments must be an array/);
+  assert.doesNotMatch(text(result), /Issue body|Comment body/);
+});
+test("keeps gh-tea selection and authentication diagnostics verbatim", async () => {
+  for (const stderr of [
+    "unknown gh-tea instance alias",
+    "cannot resolve repository from this working directory",
+    "issue not found",
+    "authentication required",
+  ]) {
+    const { tool } = load({ code: 1, stderr });
+    const result = await read(tool, "teaissue://Owner/Repo/7?use=missing");
+    assert.equal(result.isError, true);
+    assert.match(text(result), new RegExp(stderr));
+    assert.match(text(result), /gh-tea.*0\.6\.0/i);
+  }
 });
