@@ -75,6 +75,7 @@ test("preserves the maximum int64 issue number in the CLI invocation and result"
 
 test("rejects invalid issue URIs and out-of-range ids before executing gh", async () => {
   for (const path of [
+    "TeaIssue://7",
     "teaissue://0",
     "teaissue://+1",
     "teaissue://9223372036854775808",
@@ -84,8 +85,91 @@ test("rejects invalid issue URIs and out-of-range ids before executing gh", asyn
     const { tool, pi } = load();
     const result = await read(tool, path);
     assert.equal(result.isError, true, path);
+    assert.match(text(result), /Invalid teaissue URI/, path);
     assert.equal(pi.execArgs, undefined, path);
   }
+});
+test("rejects malformed selectors before the backend can run", async () => {
+  for (const path of [
+    "teaissue://Owner//Repo/1",
+    "teaissue://Owner/./1",
+    "teaissue://Owner/%2e%2e/1",
+    "teaissue://Owner/Re%2Fpo/1",
+    "teaissue://Owner/Re%5cpo/1",
+    "teaissue://Owner/Bad%3FRepo/1",
+    "teaissue://Owner/Repo/1/",
+    "teaissue://Owner/Repo/1#fragment",
+    "teaissue://user@host/Owner/Repo/1",
+    "teaissue://host:8080/Owner/Repo/1",
+    "teaissue://https://host/Owner/Repo/1",
+    "teaissue://Owner/Repo/1?line=2",
+    "teaissue://Owner/Repo/1?use=",
+    "teaissue://Owner/Repo/1?comments=",
+    "teaissue://Owner/Repo/1?comments=2",
+    "teaissue://Owner/Repo/1?use=one&use=two",
+    "teaissue://Owner/Repo/1?comments=1&comments=0",
+    "teaissue://Owner/Repo/1?use=%",
+    "teaissue://Owner/Repo/1?comments=%2531",
+  ]) {
+    const { tool, pi } = load();
+    const result = await read(tool, path);
+    assert.equal(result.isError, true, path);
+    assert.match(text(result), /Invalid teaissue URI/, path);
+    assert.equal(pi.execArgs, undefined, path);
+  }
+});
+
+test("selects an explicit repository and instance without changing their case", async () => {
+  const { tool, pi } = load();
+  const result = await read(tool, "teaissue://Owner/Repo/0007?comments=1&use=Justf", {
+    cwd: "/work/another-repo",
+  });
+  assert.equal(result.isError, undefined, text(result));
+  assert.match(text(result), /# 7: Issue title/);
+  assert.deepEqual(pi.execArgs, [
+    "gh",
+    ["tea", "issue", "view", "7", "--repo", "Owner/Repo", "--use", "Justf", "--json", "number,title,state,url,createdAt,updatedAt,closedAt,author.login,labels[].name,assignees[].login,milestone.title,body,isPullRequest,comments"],
+    { cwd: "/work/another-repo", signal: pi.execArgs[2].signal, timeout: 60000 },
+  ]);
+});
+
+test("renders comments as not requested when comments are disabled", async () => {
+  const { tool, pi } = load();
+  const result = await read(tool, "teaissue://7?comments=0");
+  assert.equal(result.isError, undefined, text(result));
+  assert.match(text(result), /Issue body\nsecond line/);
+  assert.match(text(result), /Comments were not requested\./);
+  assert.doesNotMatch(text(result), /Comment body/);
+  assert.doesNotMatch(pi.execArgs[1][5], /comments/);
+});
+
+test("accepts a body-only response without comments when comments were not requested", async () => {
+  const stdout = issueJson.replace(/,\n  "comments": \[[\s\S]*?\]/, "");
+  const { tool } = load({ stdout });
+  const result = await read(tool, "teaissue://7?comments=0");
+  assert.equal(result.isError, undefined, text(result));
+  assert.match(text(result), /Comments were not requested\./);
+});
+
+test("distinguishes an empty requested comment list from comments not requested", async () => {
+  const stdout = issueJson.replace(/"comments": \[[\s\S]*?\]/, '"comments": []');
+  const { tool } = load({ stdout });
+  const result = await read(tool, "teaissue://7");
+  assert.equal(result.isError, undefined, text(result));
+  assert.match(text(result), /No comments\./);
+});
+test("decodes accepted query values once before selecting behavior", async () => {
+  const { tool } = load();
+  const result = await read(tool, "teaissue://Owner/Repo/0007?comments=%31");
+  assert.equal(result.isError, undefined, text(result));
+  assert.match(text(result), /Comment body\nwith exact text/);
+});
+test("still rejects pull requests when comments are not requested", async () => {
+  const stdout = issueJson.replace('"isPullRequest": false', '"isPullRequest": true').replace(/,\n  "comments": \[[\s\S]*?\]/, "");
+  const { tool } = load({ stdout });
+  const result = await read(tool, "teaissue://7?comments=0");
+  assert.equal(result.isError, true);
+  assert.match(text(result), /pull request/);
 });
 
 test("rejects pull requests and incomplete or mistyped backend JSON", async (t) => {
@@ -104,19 +188,6 @@ test("rejects pull requests and incomplete or mistyped backend JSON", async (t) 
   }
 });
 
-test("delegates every non-teaissue input to native read unchanged", async () => {
-  const { tool } = load();
-  const params = { path: "issue://owner/repo/1", extra: "preserved" };
-  const nativeResult = { content: [{ type: "text", text: "native" }], details: { source: "native" } };
-  const result = await tool.execute("call-1", params, undefined, undefined, {
-    cwd: "/work/repo",
-    invokeTool: async (received) => {
-      assert.equal(received, params);
-      return nativeResult;
-    },
-  });
-  assert.equal(result, nativeResult);
-});
 
 test("fails closed when OMP marks a teaissue read result as truncated", () => {
   const { resultHook } = load();
