@@ -16,6 +16,8 @@
   },
   "scripts": {
     "build": "pnpm pack --pack-destination dist",
+    "build:release": "node scripts/build-release.js",
+    "verify:release": "node scripts/verify-release.js",
     "test": "node --test"
   },
   "dependencies": {

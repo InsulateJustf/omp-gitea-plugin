@@ -14,7 +14,7 @@ The package manifest declares `omp.extensions: ["./index.js"]`. Runtime dependen
 
 ## Build and install release 0.2.0
 
-The package keeps its existing name, `omp-gitea-issue-read`, and now includes Issue reads plus PR lists, details and raw diffs. It remains private: this release is a local installable archive, not an npm registry publication.
+The package keeps its existing name, `omp-gitea-issue-read`, and includes Issue reads plus PR lists, details and raw diffs. It remains private: these are local installable archives, not an npm registry publication. The existing npm-style pnpm package build is unchanged.
 
 From a checkout with Node.js 20+ and pnpm available:
 
@@ -24,36 +24,63 @@ pnpm test
 pnpm build
 ```
 
-The build creates `dist/omp-gitea-issue-read-0.2.0.tgz`. The archive includes the extension entry, diff parser, manifest and this README; it excludes tests, planning artifacts, installed dependencies and the checkout's pnpm lockfile. Its only runtime dependency is pinned to `lossless-json` 4.3.1 in the manifest. Installation requires registry access or an existing pnpm store.
+`pnpm build` creates `dist/omp-gitea-issue-read-0.2.0.tgz`. That existing package archive does not bundle dependencies and retains its pnpm-install requirement.
 
-Extract the archive into a permanent directory, install its production dependency, then register that directory with OMP:
+For a self-contained extension archive, build and verify on the matching operating system:
 
 ```sh
-ARCHIVE=/absolute/path/to/omp-gitea-issue-read-0.2.0.tgz
-INSTALL_DIR="$HOME/.local/share/omp-gitea-issue-read-0.2.0"
-mkdir -p "$INSTALL_DIR"
-tar -xzf "$ARCHIVE" -C "$INSTALL_DIR" --strip-components=1
-pnpm --dir "$INSTALL_DIR" install --prod
-omp install "$INSTALL_DIR"
+# macOS
+pnpm build:release --platform macos
+pnpm verify:release --platform macos
+```
+
+```powershell
+# Windows PowerShell
+pnpm build:release --platform windows
+pnpm verify:release --platform windows
+```
+
+The release commands create `dist/omp-gitea-issue-read-0.2.0-macos.tar.gz` or `dist/omp-gitea-issue-read-0.2.0-windows.zip`, plus an adjacent `.sha256` checksum file. Each contains one `omp-gitea-issue-read-0.2.0/` directory with the extension, manifest, this README, and a dereferenced production copy of `lossless-json` 4.3.1 (including its license); no pnpm store links or registry install are needed by the consumer. Verification checks the checksum and package/dependency versions, extracts to a fresh temporary directory, and exercises actual imports, registered `read` diff navigation and native delegation with local fixtures. This checks package behavior, not a live backend or Windows OMP/Gitea end-to-end support. These are pure-JavaScript Node/OMP extension distributions, not standalone native executables.
+
+The GitHub Actions workflow at `.github/workflows/release.yml` runs tests and clean-extraction verification on `macos-latest` and `windows-latest` when a `v*` tag is pushed. The tag must exactly match `v` plus `package.json`'s version. Only after both builds succeed does it publish the two archives and their checksums to a GitHub Release. Manual dispatch accepts an existing exact version tag; an existing release is never overwritten, and mismatched existing assets cause an error. Publishing uses the workflow's `GITHUB_TOKEN`, with write permission limited to the release job.
+
+Before using the extension, install OMP and make `gh` plus a compatible, authenticated `gh-tea` available on `PATH`. The extension delegates Gitea access to `gh tea`; release verification needs no real token or remote access.
+
+Download the macOS archive and checksum from the release, then extract and install it:
+
+```sh
+ARCHIVE="$HOME/Downloads/omp-gitea-issue-read-0.2.0-macos.tar.gz"
+INSTALL_PARENT="$HOME/.local/share"
+mkdir -p "$INSTALL_PARENT"
+tar -xzf "$ARCHIVE" -C "$INSTALL_PARENT"
+omp install "$INSTALL_PARENT/omp-gitea-issue-read-0.2.0"
 omp plugin list --json
 ```
 
-OMP 18.8.7 treats a local package directory as a plugin link. Keep `INSTALL_DIR` in place; moving or deleting it breaks that installation. Installing the same package name replaces its existing link. Do not load a checkout and the installed package simultaneously, or combine it with another extension wrapping `read`: wrapper composition is not guaranteed.
+Download the Windows ZIP and checksum, then run in PowerShell:
 
-For one session without persistent registration, or to load a development checkout after `pnpm install --prod --frozen-lockfile`, pass the package directory explicitly:
+```powershell
+$Archive = Join-Path $HOME 'Downloads\omp-gitea-issue-read-0.2.0-windows.zip'
+$InstallParent = Join-Path $HOME '.local\share'
+New-Item -ItemType Directory -Force -Path $InstallParent | Out-Null
+Expand-Archive -LiteralPath $Archive -DestinationPath $InstallParent
+omp install (Join-Path $InstallParent 'omp-gitea-issue-read-0.2.0')
+omp plugin list --json
+```
+
+Keep the extracted package directory in place; moving or deleting it breaks a local plugin link. Installing the same package name replaces its existing link. Do not load a checkout and the installed package simultaneously, or combine it with another extension wrapping `read`: wrapper composition is not guaranteed.
+
+For one session without persistent registration, pass the extracted package directory explicitly:
 
 ```sh
 /opt/homebrew/bin/omp \
   --no-extensions --no-skills --no-rules --no-session --no-lsp --no-title \
   --tools read --mode json --cwd /tmp \
-  --extension /absolute/path/to/installed-package-directory \
+  --extension /absolute/path/to/omp-gitea-issue-read-0.2.0 \
   -p 'Call read directly for teapr://InsulateJustf/testrepo/1?use=justf and teapr://InsulateJustf/testrepo/1/diff?use=justf. Follow a returned single-file diff link.'
 ```
 
-The example uses the existing authorized verification repository and Tea alias; substitute a readable PR and an existing alias for your deployment. `gh` and a compatible authenticated `gh-tea` must be available on `PATH`. The verified OMP binary is `/opt/homebrew/bin/omp` on macOS; other OMP versions require separate verification.
-
-Release verification uses a clean extraction, production-only dependency installation, local plugin linking in an isolated HOME, and actual OMP 18.8.7 model-driven `read` calls from the extracted package against the real Gitea PR. No user plugin installation is required by the build.
-
+This example uses the observed macOS OMP binary and authorized verification repository; substitute a readable PR and existing gh-tea alias. OMP 18.8.7 and gh-tea v0.7.1 are observed baselines only; no unverified Windows backend support is claimed.
 Release 0.2.0 also fixes explicit-repository diff routes containing once-percent-encoded PR numbers, such as `teapr://Owner/Repo/%31/diff/all`. Double-encoded numbers remain invalid; the documented literal numeric-owner/repository precedence below is unchanged.
 
 ## URI use

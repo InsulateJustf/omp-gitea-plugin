@@ -1,0 +1,230 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact existing version tag to release (for example, v0.2.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+          fetch-depth: 0
+
+      - name: Validate exact version tag
+        id: release
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          INPUT_TAG: ${{ inputs.tag }}
+          PUSH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$INPUT_TAG"
+          else
+            tag="${PUSH_REF#refs/tags/}"
+            [[ "$PUSH_REF" == "refs/tags/$tag" ]]
+          fi
+
+          version="$(node -p "require('./package.json').version")"
+          expected_tag="v$version"
+          if [[ "$tag" != "$expected_tag" ]]; then
+            echo "Refusing release: requested tag '$tag' does not match package version tag '$expected_tag'." >&2
+            exit 1
+          fi
+
+          tag_commit="$(git rev-parse "refs/tags/$tag^{commit}")"
+          if [[ "$EVENT_NAME" != "workflow_dispatch" && "$tag_commit" != "$EVENT_SHA" ]]; then
+            echo "Refusing release: pushed tag '$tag' does not resolve to triggering commit '$EVENT_SHA'." >&2
+            exit 1
+          fi
+
+          prerelease=false
+          if [[ "$version" == *-* ]]; then
+            prerelease=true
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and verify (${{ matrix.platform }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            os: macos-latest
+          - platform: windows
+            os: windows-latest
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.8.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies, test, build and verify (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm test
+          pnpm build:release --platform macos
+          pnpm verify:release --platform macos
+
+      - name: Install dependencies, test, build and verify (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Invoke-Pnpm {
+            & pnpm @args
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          Invoke-Pnpm install --frozen-lockfile
+          Invoke-Pnpm test
+          Invoke-Pnpm build:release --platform windows
+          Invoke-Pnpm verify:release --platform windows
+
+      - name: Upload macOS release assets
+        if: matrix.platform == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          if-no-files-found: error
+          path: |
+            dist/omp-gitea-issue-read-*-macos.tar.gz
+            dist/omp-gitea-issue-read-*-macos.tar.gz.sha256
+
+      - name: Upload Windows release assets
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          if-no-files-found: error
+          path: |
+            dist/omp-gitea-issue-read-*-windows.zip
+            dist/omp-gitea-issue-read-*-windows.zip.sha256
+
+  publish:
+    name: Publish GitHub release
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-macos
+          path: downloaded/macos
+
+      - name: Download Windows assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-windows
+          path: downloaded/windows
+
+      - name: Collect and verify exactly four release assets
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          version="${RELEASE_TAG#v}"
+          mac="omp-gitea-issue-read-${version}-macos.tar.gz"
+          windows="omp-gitea-issue-read-${version}-windows.zip"
+          cp "downloaded/macos/$mac" "downloaded/macos/$mac.sha256" release-assets/
+          cp "downloaded/windows/$windows" "downloaded/windows/$windows.sha256" release-assets/
+          expected=("$mac" "$mac.sha256" "$windows" "$windows.sha256")
+          actual=(release-assets/*)
+          if [[ "${#actual[@]}" -ne 4 ]]; then
+            echo "Expected exactly four release assets, found ${#actual[@]}." >&2
+            exit 1
+          fi
+          cd release-assets
+          sha256sum -c "$mac.sha256"
+          sha256sum -c "$windows.sha256"
+          for asset in "${expected[@]}"; do
+            [[ -f "$asset" ]]
+          done
+
+      - name: Publish release without overwriting an existing release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          mac="omp-gitea-issue-read-${version}-macos.tar.gz"
+          windows="omp-gitea-issue-read-${version}-windows.zip"
+          assets=("$mac" "$mac.sha256" "$windows" "$windows.sha256")
+
+          if gh release view "$RELEASE_TAG" --json tagName,isDraft,isPrerelease,assets >release.json 2>/dev/null; then
+            if ! jq -e \
+              --arg tag "$RELEASE_TAG" \
+              --arg prerelease "$PRERELEASE" \
+              --arg mac "$mac" \
+              --arg windows "$windows" \
+              '.tagName == $tag and .isDraft == false and .isPrerelease == ($prerelease == "true") and
+               ([.assets[].name] | sort) == ([$mac, ($mac + ".sha256"), $windows, ($windows + ".sha256")] | sort)' \
+              release.json >/dev/null; then
+              echo "Refusing to reuse existing release '$RELEASE_TAG': it is not a published matching release with exactly the expected assets." >&2
+              exit 1
+            fi
+
+            mkdir existing-release
+            gh release download "$RELEASE_TAG" --dir existing-release
+            for asset in "${assets[@]}"; do
+              if ! cmp -s "release-assets/$asset" "existing-release/$asset"; then
+                echo "Refusing to reuse existing release '$RELEASE_TAG': asset '$asset' differs from this run." >&2
+                exit 1
+              fi
+            done
+            echo "Matching published release '$RELEASE_TAG' already exists; verified all four assets and left it unchanged."
+            exit 0
+          fi
+
+          args=("$RELEASE_TAG" release-assets/"$mac" release-assets/"$mac.sha256" release-assets/"$windows" release-assets/"$windows.sha256" --title "$RELEASE_TAG" --generate-notes --verify-tag)
+          if [[ "$PRERELEASE" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
