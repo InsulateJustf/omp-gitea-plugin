@@ -185,30 +185,31 @@ function renderIssue(issue) {
   return lines.join("\n");
 }
 
-function decodeSegment(segment, label) {
+function decodeSegment(segment, label, scheme = "teaissue") {
   let decoded;
   try {
     decoded = decodeURIComponent(segment);
   } catch {
-    throw new Error(`Invalid teaissue URI: malformed encoding in ${label}`);
+    throw new Error(`Invalid ${scheme} URI: malformed encoding in ${label}`);
   }
   if (!decoded || decoded === "." || decoded === ".." || /[\\/]/.test(decoded)) {
-    throw new Error(`Invalid teaissue URI: invalid ${label}`);
+    throw new Error(`Invalid ${scheme} URI: invalid ${label}`);
   }
   return decoded;
 }
 
-function decodeQueryValue(value, label) {
+function decodeQueryValue(value, label, scheme = "teaissue") {
   try {
     return decodeURIComponent(value);
   } catch {
-    throw new Error(`Invalid teaissue URI: malformed encoding in ${label}`);
+    throw new Error(`Invalid ${scheme} URI: malformed encoding in ${label}`);
   }
 }
 
-function decodeQueryKey(value) {
-  return decodeQueryValue(value, "query parameter");
+function decodeQueryKey(value, scheme = "teaissue") {
+  return decodeQueryValue(value, "query parameter", scheme);
 }
+
 const PR_LIST_FIELDS = "number,title,state,isDraft,url,createdAt,updatedAt,author.login,labels[].name,baseRefName,headRefName";
 
 function parseTeaprListUri(path) {
@@ -221,7 +222,7 @@ function parseTeaprListUri(path) {
   const queryPart = queryIndex === -1 ? null : uri.slice(queryIndex + 1);
   let repo;
   if (pathPart !== "") {
-    const segments = pathPart.split("/").map((segment, index) => decodeSegment(segment, `path segment ${index + 1}`));
+    const segments = pathPart.split("/").map((segment, index) => decodeSegment(segment, `path segment ${index + 1}`, "teapr"));
     if (segments.length !== 2) invalid();
     const [owner, name] = segments;
     if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(name)) {
@@ -236,8 +237,8 @@ function parseTeaprListUri(path) {
     for (const pair of queryPart.split("&")) {
       const equals = pair.indexOf("=");
       if (equals <= 0) invalid();
-      const key = decodeQueryKey(pair.slice(0, equals));
-      const value = decodeQueryValue(pair.slice(equals + 1), `${key} value`);
+      const key = decodeQueryKey(pair.slice(0, equals), "teapr");
+      const value = decodeQueryValue(pair.slice(equals + 1), `${key} value`, "teapr");
       if (!["use", "state", "limit", "author", "label"].includes(key)) invalid();
       if (seen.has(key)) throw new Error(`Invalid teapr URI: repeated ${key} parameter`);
       seen.add(key);
@@ -428,7 +429,7 @@ export default function teaissueExtension(pi) {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           return toolError(message.includes("gh tea JSON contract error")
-            ? `${message}\nThis resource requires gh-tea PR read support (pr list, pr view JSON, and pr diff); install a compatible gh-tea build.`
+            ? `gh tea pr list JSON contract error: ${message.replace(/^gh tea JSON contract error:\s*/, "")}\nThis resource requires gh-tea PR read support (pr list, pr view JSON, and pr diff); install a compatible gh-tea build.`
             : message);
         }
       }
