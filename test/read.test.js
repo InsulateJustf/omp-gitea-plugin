@@ -518,8 +518,9 @@ test("decodes quoted Unicode paths and classifies rename, mode, and binary chang
   const mode = "diff --git a/script b/script\nold mode 100644\nnew mode 100755\n";
   const deleted = "diff --git a/gone b/gone\ndeleted file mode 100644\n--- a/gone\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n";
   const binary = "diff --git a/image b/image\nGIT binary patch\nliteral 8\nPcmZQ@^7Lb5VrBpU1tI|8\n\nliteral 0\nHcmV?d00001\n\n";
+  const delta = "diff --git a/delta-image b/delta-image\nGIT binary patch\ndelta 6\nNc${NqX3k432LJ-T0aO40\n\nliteral 0\nHcmV?d00001\n\n";
   const differ = "diff --git a/other-image b/other-image\nBinary files a/other-image and b/other-image differ\n";
-  const raw = [quoted, rename, mode, deleted, binary, differ].join("");
+  const raw = [quoted, rename, mode, deleted, binary, differ, delta].join("");
   const { tool } = load({ stdout: raw });
   const listing = text(await read(tool, "teapr://12/diff"));
   assert.ok(listing.includes("1. modified: space é \"x\".txt (+2 -2)"));
@@ -527,6 +528,7 @@ test("decodes quoted Unicode paths and classifies rename, mode, and binary chang
   assert.ok(listing.includes("3. modified: script (+0 -0)"));
   assert.ok(listing.includes("4. deleted: gone (+0 -1)"));
   assert.ok(listing.includes("5. binary: image (+0 -0)"));
+  assert.ok(listing.includes("7. binary: delta-image (+0 -0)"));
   assert.ok(listing.includes("6. binary: other-image (+0 -0)"));
   const selected = await read(tool, "teapr://12/diff/1");
   assert.equal(text(selected), quoted);
