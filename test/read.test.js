@@ -505,6 +505,7 @@ test("fails closed for empty-index, malformed, and truncated raw diff output", a
     "diff --git a/image b/image\nGIT binary patch\n",
     "diff --git a/image b/image\nGIT binary patch\nliteral 3\nA00000\n\nliteral 0\n\n",
     "diff --git a/image b/image\nGIT binary patch\nliteral 8\nPcmZQ@^7Lb5VrBpU1tI|8\n\nliteral 0\n\n",
+    "diff --git a/image b/image\nGIT binary patch\ndelta 3\nKc${NqW&i*H5&#DP\n\nliteral 0\nHcmV?d00001\n\n",
   ]) {
     const result = await read(load({ stdout: raw }).tool, "teapr://12/diff/all");
     assert.equal(result.isError, true, raw);
