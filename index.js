@@ -381,7 +381,7 @@ export default function teaissueExtension(pi) {
   pi.registerTool({
     name: "read",
     label: "Read",
-    description: "Read files, URLs, and GitHub issue:// URIs normally. For Gitea issues use teaissue://<issue-number>; for Gitea PR lists use teapr://[<owner>/<repo>] with optional state, limit, author, label and use filters. Other paths are passed to the native read tool.",
+    description: `Read files, URLs, and native GitHub issue:// and pr:// resources normally. This extension handles teaissue://<number> (repository from the current session working directory) or teaissue://<owner>/<repo>/<number> (explicit repository), with optional use=<alias>; comments are requested by default, and comments=0 disables them (comments=1 requests them explicitly). Gitea PR lists use teapr:// or teapr://<owner>/<repo>, with optional state=open|closed|merged|all (default open), limit=<positive decimal> (default 30, maximum 100), author, label, and use filters. Gitea URI handling is available only through read in the loaded agent session; other paths are passed unchanged to native read.`,
     parameters: pi.zod.object({ path: pi.zod.string() }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       let issue;
