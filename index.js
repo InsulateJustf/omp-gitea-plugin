@@ -209,6 +209,100 @@ function decodeQueryValue(value, label) {
 function decodeQueryKey(value) {
   return decodeQueryValue(value, "query parameter");
 }
+const PR_LIST_FIELDS = "number,title,state,isDraft,url,createdAt,updatedAt,author.login,labels[].name,baseRefName,headRefName";
+
+function parseTeaprListUri(path) {
+  if (!/^teapr:/i.test(path)) return null;
+  const invalid = () => { throw new Error("Invalid teapr URI: expected teapr:// or teapr://<owner>/<repo> for a pull request list"); };
+  if (!path.startsWith("teapr://") || path.includes("#")) invalid();
+  const uri = path.slice("teapr://".length);
+  const queryIndex = uri.indexOf("?");
+  const pathPart = queryIndex === -1 ? uri : uri.slice(0, queryIndex);
+  const queryPart = queryIndex === -1 ? null : uri.slice(queryIndex + 1);
+  let repo;
+  if (pathPart !== "") {
+    const segments = pathPart.split("/").map((segment, index) => decodeSegment(segment, `path segment ${index + 1}`));
+    if (segments.length !== 2) invalid();
+    const [owner, name] = segments;
+    if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(name)) {
+      throw new Error("Invalid teapr URI: owner and repository may contain only letters, numbers, '.', '_' and '-'");
+    }
+    repo = `${owner}/${name}`;
+  }
+  const options = { repo, state: "open", limit: "30" };
+  const seen = new Set();
+  if (queryPart !== null) {
+    if (!queryPart) invalid();
+    for (const pair of queryPart.split("&")) {
+      const equals = pair.indexOf("=");
+      if (equals <= 0) invalid();
+      const key = decodeQueryKey(pair.slice(0, equals));
+      const value = decodeQueryValue(pair.slice(equals + 1), `${key} value`);
+      if (!["use", "state", "limit", "author", "label"].includes(key)) invalid();
+      if (seen.has(key)) throw new Error(`Invalid teapr URI: repeated ${key} parameter`);
+      seen.add(key);
+      if (!value) throw new Error(`Invalid teapr URI: empty ${key} value`);
+      if (key === "state") {
+        if (!["open", "closed", "merged", "all"].includes(value)) {
+          throw new Error("Invalid teapr URI: state must be open, closed, merged or all");
+        }
+        options.state = value;
+      } else if (key === "limit") {
+        if (!/^[0-9]+$/.test(value) || BigInt(value) <= 0n) {
+          throw new Error("Invalid teapr URI: limit must be a positive decimal integer");
+        }
+        options.limit = BigInt(value) > 100n ? "100" : BigInt(value).toString();
+      } else {
+        options[key] = value;
+      }
+    }
+  }
+  return options;
+}
+
+function validatePrList(value) {
+  return requiredArray(value, "pull requests").map((entry, index) => {
+    const pr = object(entry, `pull request ${index + 1}`);
+    const number = positiveInt64(required(pr, "number", `pull request ${index + 1}.number`), "number");
+    const title = string(required(pr, "title"), "title");
+    const state = string(required(pr, "state"), "state");
+    if (!["open", "closed", "merged"].includes(state)) throw new Error("gh tea JSON contract error: state must be open, closed or merged");
+    const draft = required(pr, "isDraft");
+    if (draft !== null && typeof draft !== "boolean") throw new Error("gh tea JSON contract error: isDraft must be a boolean or null");
+    const url = required(pr, "url");
+    if (url !== null && typeof url !== "string") throw new Error("gh tea JSON contract error: url must be a string or null");
+    const updatedAt = required(pr, "updatedAt");
+    if (updatedAt !== null && (typeof updatedAt !== "string" || !isRfc3339(updatedAt))) {
+      throw new Error("gh tea JSON contract error: updatedAt must be RFC3339 or null");
+    }
+    const authorValue = required(pr, "author");
+    const author = authorValue === null ? "Missing" : string(required(object(authorValue, "author"), "login", "author.login"), "author.login") || "Missing";
+    const labels = requiredArray(required(pr, "labels"), "labels").map((label) =>
+      string(required(object(label, "label"), "name", "labels[].name"), "labels[].name"));
+    const createdAt = required(pr, "createdAt");
+    if (createdAt !== null && (typeof createdAt !== "string" || !isRfc3339(createdAt))) {
+      throw new Error("gh tea JSON contract error: createdAt must be RFC3339 or null");
+    }
+    for (const field of ["baseRefName", "headRefName"]) {
+      const ref = required(pr, field);
+      if (ref !== null && typeof ref !== "string") throw new Error(`gh tea JSON contract error: ${field} must be a string or null`);
+    }
+    return { number, title, state, draft, url, updatedAt, author, labels };
+  });
+}
+
+function renderPrList(prs, options) {
+  const filters = `Requested state: ${options.state}; limit: ${options.limit}.`;
+  if (prs.length === 0) return `No pull requests match the requested filters.\n${filters}`;
+  const selectedRepo = options.repo;
+  return `${filters}\n\n${prs.map((pr) => {
+    const link = selectedRepo ? `teapr://${selectedRepo}/${pr.number}` : `teapr://${pr.number}`;
+    const url = options.use ? `${link}?use=${encodeURIComponent(options.use)}` : link;
+    const labels = pr.labels.length ? pr.labels.join(", ") : "none";
+    return `PR #${pr.number}: ${pr.title}\nState: ${pr.state}; draft: ${pr.draft === null ? "Missing" : pr.draft ? "yes" : "no"}; author: ${pr.author}; updated: ${displayMissing(pr.updatedAt)}; labels: ${labels}\n${url}`;
+  }).join("\n\n")}`;
+}
+
 function parseIssueUri(path) {
   if (!/^teaissue:/i.test(path)) return null;
   const invalid = () => { throw new Error("Invalid teaissue URI: expected teaissue://<issue number> or teaissue://<owner>/<repo>/<issue number>"); };
@@ -267,13 +361,17 @@ function formatExecutionError(error) {
 
 export default function teaissueExtension(pi) {
   pi.on("tool_result", (event) => {
-    if (event.toolName !== "read" || !/^teaissue:/i.test(event.input.path ?? "") || !event.details?.meta?.truncation) {
+    const path = event.input.path ?? "";
+    if (event.toolName !== "read" || !/^(?:teaissue:|teapr:)/i.test(path) || !event.details?.meta?.truncation) {
       return;
     }
+    const isPr = /^teapr:/i.test(path);
     return {
       content: [{
         type: "text",
-        text: "Gitea issue result was truncated by OMP's output limit. The complete issue and comments are unavailable.",
+        text: isPr
+          ? "Gitea pull request result was truncated by OMP's output limit. The complete PR result is unavailable."
+          : "Gitea issue result was truncated by OMP's output limit. The complete issue and comments are unavailable.",
       }],
       isError: true,
     };
@@ -282,21 +380,58 @@ export default function teaissueExtension(pi) {
   pi.registerTool({
     name: "read",
     label: "Read",
-    description: "Read files, URLs, and GitHub issue:// URIs normally. For a Gitea issue, call read directly with path teaissue://<issue-number> or teaissue://<owner>/<repo>/<issue-number> (optional ?use=<alias> and ?comments=0|1) in this agent session. The issue is resolved using the current working directory unless repository and instance are selected explicitly. This wrapper does not add support to the standalone omp read command. Other paths are passed to the native read tool.",
+    description: "Read files, URLs, and GitHub issue:// URIs normally. For Gitea issues use teaissue://<issue-number>; for Gitea PR lists use teapr://[<owner>/<repo>] with optional state, limit, author, label and use filters. Other paths are passed to the native read tool.",
     parameters: pi.zod.object({ path: pi.zod.string() }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       let issue;
+      let list;
       try {
         if (typeof params.path !== "string") throw new Error("read path must be a string");
-        issue = parseIssueUri(params.path);
+        if (/^teapr:/i.test(params.path)) list = parseTeaprListUri(params.path);
+        else issue = parseIssueUri(params.path);
       } catch (error) {
         return toolError(error instanceof Error ? error.message : String(error));
       }
-      if (issue === null) {
+      if (issue == null && list == null) {
         if (typeof ctx.invokeTool !== "function") return toolError("Native read delegation is unavailable in this OMP session.");
         return ctx.invokeTool(params);
       }
-      if (signal?.aborted) return toolError("gh tea issue view was cancelled before execution.");
+      if (signal?.aborted) return toolError(list ? "gh tea pr list was cancelled before execution." : "gh tea issue view was cancelled before execution.");
+      if (list != null) {
+        const args = ["tea", "pr", "list"];
+        if (list.repo !== undefined) args.push("--repo", list.repo);
+        if (list.use !== undefined) args.push("--use", list.use);
+        args.push("--state", list.state, "--limit", list.limit);
+        if (list.author !== undefined) args.push("--author", list.author);
+        if (list.label !== undefined) args.push("--label", list.label);
+        args.push("--json", PR_LIST_FIELDS);
+        let result;
+        try {
+          result = await pi.exec("gh", args, { cwd: ctx.cwd, signal, timeout: 60000 });
+        } catch (error) {
+          return toolError(`Unable to execute gh tea pr list: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (result.killed || signal?.aborted) {
+          return toolError(`gh tea pr list was cancelled or timed out${result.stderr ? `: ${result.stderr}` : "."}`);
+        }
+        if (result.code !== 0) {
+          return toolError(`gh tea pr list exited with code ${result.code}${result.stderr ? `:\n${result.stderr}` : " (no stderr)"}\nThis resource requires gh-tea PR read support (pr list, pr view JSON, and pr diff); install a compatible gh-tea build.`);
+        }
+        let decoded;
+        try {
+          decoded = parse(result.stdout);
+        } catch (error) {
+          return toolError(`gh tea pr list JSON contract error: invalid or incomplete JSON (${error instanceof Error ? error.message : String(error)})\nThis resource requires gh-tea PR read support (pr list, pr view JSON, and pr diff); install a compatible gh-tea build.`);
+        }
+        try {
+          return { content: [{ type: "text", text: renderPrList(validatePrList(decoded), list) }] };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return toolError(message.includes("gh tea JSON contract error")
+            ? `${message}\nThis resource requires gh-tea PR read support (pr list, pr view JSON, and pr diff); install a compatible gh-tea build.`
+            : message);
+        }
+      }
 
       const args = ["tea", "issue", "view", issue.number];
       if (issue.repo !== undefined) args.push("--repo", issue.repo);
