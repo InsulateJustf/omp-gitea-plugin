@@ -447,4 +447,110 @@ test("keeps PR numbers lossless and rejects list contract errors atomically", as
   assert.doesNotMatch(text(invalidRead), /List title/);
 });
 
+test("reads exact raw PR diffs and links files back to the selected diff", async () => {
+  const raw = [
+    "diff --git a/old name.txt b/old name.txt",
+    "index 1..2 100644",
+    "--- a/old name.txt",
+    "+++ b/old name.txt",
+    "@@ -1 +1,2 @@",
+    "-old",
+    "+new",
+    "+extra",
+    "diff --git a/second b/second",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/second",
+    "@@ -0,0 +1 @@",
+    "+hello",
+  ].join("\n");
+  const { tool, pi } = load({ stdout: raw });
+  const all = await read(tool, "teapr://Owner/Repo/0012/diff/all?use=work");
+  assert.equal(text(all), raw);
+  assert.deepEqual(pi.execArgs[1], ["tea", "pr", "diff", "12", "--repo", "Owner/Repo", "--use", "work"]);
+  const second = await read(tool, "teapr://Owner/Repo/12/diff/2?use=work");
+  assert.equal(text(second), raw.slice(raw.indexOf("diff --git a/second")));
+  const navigation = await read(tool, "teapr://Owner/Repo/12/diff?use=work");
+  assert.ok(text(navigation).includes("1. modified: old name.txt (+2 -1)"));
+  assert.ok(text(navigation).includes("2. added: second (+1 -0)"));
+  assert.ok(text(navigation).includes("teapr://Owner/Repo/12/diff/1?use=work"));
+  assert.ok(text(navigation).toLowerCase().includes("re-read /diff"));
+});
+
+test("rejects malformed PR diff and unsafe indices before backend execution", async () => {
+  for (const path of ["TEAPR://12/diff", "teapr://12/Diff", "teapr://12/diff:raw", "teapr://12/diff/0", "teapr://12/diff/1/extra",
+    "teapr://12/diff/all?use=", "teapr://12/diff?use=a&use=b", "teapr://12/diff/all#part",
+    "teapr://12/diff/%ZZ", "teapr://12/diff/all?raw=1"]) {
+    const { tool, pi } = load({ stdout: "diff --git a/x b/x\n" });
+    const result = await read(tool, path);
+    assert.equal(result.isError, true, path);
+    assert.equal(pi.execArgs, undefined, path);
+  }
+  const valid = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n";
+  const huge = await read(load({ stdout: valid }).tool, "teapr://12/diff/999999999999999999999999999999");
+  assert.equal(huge.isError, true);
+  assert.match(text(huge), /999999999999999999999999999999.*1 files/);
+});
+
+test("fails closed for empty-index, malformed, and truncated raw diff output", async () => {
+  const empty = load({ stdout: "" });
+  assert.equal(text(await read(empty.tool, "teapr://12/diff")), "No file changes.");
+  assert.equal(text(await read(empty.tool, "teapr://12/diff/all")), "");
+  assert.match(text(await read(empty.tool, "teapr://12/diff/1")), /out of range.*0 files/i);
+  for (const raw of [
+    "not a diff",
+    "diff --git a/x b/x\n",
+    "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n",
+    "diff --git a/image b/image\nGIT binary patch\n",
+    "diff --git a/image b/image\nGIT binary patch\nliteral 4\nobvious garbage\n\nliteral 0\n\n",
+  ]) {
+    const result = await read(load({ stdout: raw }).tool, "teapr://12/diff/all");
+    assert.equal(result.isError, true, raw);
+  }
+});
+test("decodes quoted Unicode paths and classifies rename, mode, and binary changes", async () => {
+  const quoted = String.raw`diff --git "a/space \303\251 \"x\".txt" "b/space \303\251 \"x\".txt"` +
+    "\r\nindex 1..2 100644\r\n--- \"a/space \\303\\251 \\\"x\\\".txt\"\r\n+++ \"b/space \\303\\251 \\\"x\\\".txt\"\r\n" +
+    "@@ -1,2 +1,2 @@\r\n-old\r\n+new\r\n----marker\r\n++++marker\r\n\\ No newline at end of file\r\n";
+  const rename = "diff --git a/old b/new\nsimilarity index 100%\nrename from old\nrename to new\n";
+  const mode = "diff --git a/script b/script\nold mode 100644\nnew mode 100755\n";
+  const deleted = "diff --git a/gone b/gone\ndeleted file mode 100644\n--- a/gone\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n";
+  const binary = "diff --git a/image b/image\nGIT binary patch\nliteral 3\nA00000\n\nliteral 0\n\n";
+  const differ = "diff --git a/other-image b/other-image\nBinary files a/other-image and b/other-image differ\n";
+  const raw = [quoted, rename, mode, deleted, binary, differ].join("");
+  const { tool } = load({ stdout: raw });
+  const listing = text(await read(tool, "teapr://12/diff"));
+  assert.ok(listing.includes("1. modified: space é \"x\".txt (+2 -2)"));
+  assert.ok(listing.includes("2. renamed: new (from old) (+0 -0)"));
+  assert.ok(listing.includes("3. modified: script (+0 -0)"));
+  assert.ok(listing.includes("4. deleted: gone (+0 -1)"));
+  assert.ok(listing.includes("5. binary: image (+0 -0)"));
+  assert.ok(listing.includes("6. binary: other-image (+0 -0)"));
+  const selected = await read(tool, "teapr://12/diff/1");
+  assert.equal(text(selected), quoted);
+});
+test("PR diff execution failures are atomic and retain CLI diagnostics", async () => {
+  const failed = load({ code: 2, stderr: "permission denied" });
+  const result = await read(failed.tool, "teapr://12/diff/all");
+  assert.equal(result.isError, true);
+  assert.match(text(result), /gh tea pr diff exited with code 2/);
+  assert.match(text(result), /permission denied/);
+  assert.match(text(result), /requires gh-tea PR read support/);
+  assert.deepEqual(failed.pi.execArgs[1], ["tea", "pr", "diff", "12"]);
+
+  const cancelled = load({ killed: true, stderr: "terminated" });
+  const aborted = await read(cancelled.tool, "teapr://12/diff");
+  assert.equal(aborted.isError, true);
+  assert.match(text(aborted), /gh tea pr diff was cancelled or timed out/);
+  assert.match(text(aborted), /terminated/);
+});
+test("parses mixed quoted and unquoted Git header paths", async () => {
+  const forward = String.raw`diff --git a/ascii old "b/unicode\303\251"` +
+    "\nsimilarity index 100%\nrename from ascii old\n" + String.raw`rename to "unicode\303\251"` + "\n";
+  const reverse = String.raw`diff --git "a/quoted\a-name" b/ascii-new` +
+    "\nsimilarity index 100%\n" + String.raw`rename from "quoted\a-name"` + "\nrename to ascii-new\n";
+  const result = await read(load({ stdout: `${forward}${reverse}` }).tool, "teapr://15/diff");
+  assert.ok(text(result).includes("1. renamed: unicodeé (from ascii old) (+0 -0)"), text(result));
+  assert.ok(text(result).includes(`2. renamed: ascii-new (from quoted${String.fromCharCode(7)}-name) (+0 -0)`));
+});
 
