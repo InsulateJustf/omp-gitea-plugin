@@ -271,7 +271,7 @@ function parseTeaprDiffUri(path) {
   const queryPart = queryIndex === -1 ? null : uri.slice(queryIndex + 1);
   const route = pathPart.match(/^(.*)\/diff(?:\/(all|[0-9]+))?$/);
   if (!route) {
-    if (/\/diff(?::|\/|$)/i.test(pathPart)) throw new Error("Invalid teapr URI: malformed diff route");
+    if (/\/diff(?::|\/|$)/.test(pathPart)) throw new Error("Invalid teapr URI: malformed diff route");
     return null;
   }
   const detailSegments = route[1].split("/");

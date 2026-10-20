@@ -478,7 +478,7 @@ test("reads exact raw PR diffs and links files back to the selected diff", async
 });
 
 test("rejects malformed PR diff and unsafe indices before backend execution", async () => {
-  for (const path of ["TEAPR://12/diff", "teapr://12/Diff", "teapr://12/diff:raw", "teapr://12/diff/0", "teapr://12/diff/1/extra",
+  for (const path of ["TEAPR://12/diff", "teapr://12/diff:raw", "teapr://12/diff/0", "teapr://12/diff/1/extra",
     "teapr://12/diff/all?use=", "teapr://12/diff?use=a&use=b", "teapr://12/diff/all#part",
     "teapr://12/diff/%ZZ", "teapr://12/diff/all?raw=1", "teapr://12/diff?state=all"]) {
     const { tool, pi } = load({ stdout: "diff --git a/x b/x\n" });

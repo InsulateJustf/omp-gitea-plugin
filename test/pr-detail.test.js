@@ -148,7 +148,8 @@ test("preserves PR list dispatch alongside detail parsing", async () => {
     ["teapr://", ["tea", "pr", "list"]],
     ["teapr://123/diff?use=fixture", ["tea", "pr", "diff", "123", "--use", "fixture"], "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"],
     ["teapr://Owner/diff?state=all", ["tea", "pr", "list", "--repo", "Owner/diff", "--state", "all", "--limit", "30"]],
-    ["teapr://Owner/diff/12", ["tea", "pr", "view", "12", "--repo", "Owner/diff"], json({ number: 12 })],
+    ["teapr://Owner/Diff?state=all", ["tea", "pr", "list", "--repo", "Owner/Diff", "--state", "all", "--limit", "30"]],
+    ["teapr://Owner/Diff/12", ["tea", "pr", "view", "12", "--repo", "Owner/Diff"], json({ number: 12 })],
     ["teapr://123/%64iff?state=all", ["tea", "pr", "list", "--repo", "123/diff", "--state", "all", "--limit", "30"]],
   ]) {
     const { tool, pi } = load({ stdout });
