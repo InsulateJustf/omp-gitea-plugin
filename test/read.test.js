@@ -502,6 +502,7 @@ test("fails closed for empty-index, malformed, and truncated raw diff output", a
     "diff --git a/x b/x\n",
     "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n",
     "diff --git a/image b/image\nGIT binary patch\n",
+    "diff --git a/image b/image\nGIT binary patch\nliteral 4\nobvious garbage\n\nliteral 0\n\n",
   ]) {
     const result = await read(load({ stdout: raw }).tool, "teapr://12/diff/all");
     assert.equal(result.isError, true, raw);
@@ -514,7 +515,7 @@ test("decodes quoted Unicode paths and classifies rename, mode, and binary chang
   const rename = "diff --git a/old b/new\nsimilarity index 100%\nrename from old\nrename to new\n";
   const mode = "diff --git a/script b/script\nold mode 100644\nnew mode 100755\n";
   const deleted = "diff --git a/gone b/gone\ndeleted file mode 100644\n--- a/gone\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n";
-  const binary = "diff --git a/image b/image\nGIT binary patch\nliteral 3\narbitrary +/-- payload\n";
+  const binary = "diff --git a/image b/image\nGIT binary patch\nliteral 3\nA00000\n\nliteral 0\n\n";
   const differ = "diff --git a/other-image b/other-image\nBinary files a/other-image and b/other-image differ\n";
   const raw = [quoted, rename, mode, deleted, binary, differ].join("");
   const { tool } = load({ stdout: raw });
@@ -542,5 +543,14 @@ test("PR diff execution failures are atomic and retain CLI diagnostics", async (
   assert.equal(aborted.isError, true);
   assert.match(text(aborted), /gh tea pr diff was cancelled or timed out/);
   assert.match(text(aborted), /terminated/);
+});
+test("parses mixed quoted and unquoted Git header paths", async () => {
+  const forward = String.raw`diff --git a/ascii old "b/unicode\303\251"` +
+    "\nsimilarity index 100%\nrename from ascii old\n" + String.raw`rename to "unicode\303\251"` + "\n";
+  const reverse = String.raw`diff --git "a/quoted\a-name" b/ascii-new` +
+    "\nsimilarity index 100%\n" + String.raw`rename from "quoted\a-name"` + "\nrename to ascii-new\n";
+  const result = await read(load({ stdout: `${forward}${reverse}` }).tool, "teapr://15/diff");
+  assert.ok(text(result).includes("1. renamed: unicodeé (from ascii old) (+0 -0)"), text(result));
+  assert.ok(text(result).includes(`2. renamed: ascii-new (from quoted${String.fromCharCode(7)}-name) (+0 -0)`));
 });
 

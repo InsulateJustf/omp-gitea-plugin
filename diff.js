@@ -15,7 +15,7 @@ function decodeQuoted(value) {
     i += 1;
     if (i >= value.length - 1) throw new Error("invalid quoted Git path escape");
     const escaped = value[i];
-    const simple = { '"': 34, "\\": 92, t: 9, n: 10, r: 13, b: 8, f: 12, v: 11 };
+    const simple = { '"': 34, "\\": 92, a: 7, t: 9, n: 10, r: 13, b: 8, f: 12, v: 11 };
     if (Object.hasOwn(simple, escaped)) { bytes.push(simple[escaped]); continue; }
     if (/[0-7]/.test(escaped)) {
       let octal = escaped;
@@ -30,36 +30,45 @@ function decodeQuoted(value) {
   return new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
 }
 
+function quotedPathEnd(value, start) {
+  let index = start + 1;
+  let escaped = false;
+  while (index < value.length) {
+    if (!escaped && value[index] === '"') return index + 1;
+    if (!escaped && value[index] === "\\") escaped = true;
+    else escaped = false;
+    index += 1;
+  }
+  throw new Error("unterminated quoted Git path");
+}
+
 function gitHeaderPaths(line) {
   const header = line.match(DIFF_HEADER);
   if (!header) throw new Error("missing Git diff header");
   const value = header[1];
+  let oldToken;
+  let newToken;
   if (value.startsWith('"')) {
-    const tokens = [];
-    let index = 0;
-    while (index < value.length) {
-      while (value[index] === " ") index += 1;
-      if (index >= value.length) break;
-      const start = index;
-      if (value[index] === '"') {
-        index += 1;
-        let escaped = false;
-        while (index < value.length) {
-          if (!escaped && value[index] === '"') { index += 1; break; }
-          if (!escaped && value[index] === "\\") escaped = true;
-          else escaped = false;
-          index += 1;
-        }
-        if (value[index - 1] !== '"') throw new Error("unterminated quoted Git path");
-      } else while (index < value.length && value[index] !== " ") index += 1;
-      tokens.push(decodeQuoted(value.slice(start, index)));
+    const end = quotedPathEnd(value, 0);
+    if (value[end] !== " ") throw new Error("invalid Git diff paths");
+    oldToken = value.slice(0, end);
+    newToken = value.slice(end + 1);
+  } else {
+    const quotedNew = value.lastIndexOf(' "b/');
+    if (quotedNew !== -1) {
+      oldToken = value.slice(0, quotedNew);
+      newToken = value.slice(quotedNew + 1);
+    } else {
+      const match = value.match(/^a\/(.*) b\/(.*)$/);
+      if (!match) throw new Error("invalid Git diff paths");
+      oldToken = `a/${match[1]}`;
+      newToken = `b/${match[2]}`;
     }
-    if (tokens.length !== 2 || !tokens[0].startsWith("a/") || !tokens[1].startsWith("b/")) throw new Error("invalid Git diff paths");
-    return [tokens[0].slice(2), tokens[1].slice(2)];
   }
-  const match = value.match(/^a\/(.*) b\/(.*)$/);
-  if (!match) throw new Error("invalid Git diff paths");
-  return [match[1], match[2]];
+  const oldPath = oldToken.startsWith('"') ? decodeQuoted(oldToken) : oldToken;
+  const newPath = newToken.startsWith('"') ? decodeQuoted(newToken) : newToken;
+  if (!oldPath.startsWith("a/") || !newPath.startsWith("b/")) throw new Error("invalid Git diff paths");
+  return [oldPath.slice(2), newPath.slice(2)];
 }
 
 function pathHeader(line, prefix) {
@@ -69,6 +78,14 @@ function pathHeader(line, prefix) {
   else value = value.split("\t", 1)[0];
   if ((prefix === "--- " && value.startsWith("a/")) || (prefix === "+++ " && value.startsWith("b/"))) value = value.slice(2);
   return value;
+}
+
+function isBinaryPatchLine(line) {
+  if (!line) return false;
+  const code = line.charCodeAt(0);
+  const byteCount = code >= 65 && code <= 90 ? code - 64 : code >= 97 && code <= 122 ? code - 70 : 0;
+  return byteCount > 0 && line.length === 1 + Math.ceil(byteCount / 4) * 5 &&
+    /^[0-9A-Za-z!#$%&()*+\-;<=>?@^_`{|}~]+$/.test(line.slice(1));
 }
 
 function parseFile(raw, startOffset, endOffset) {
@@ -85,8 +102,9 @@ function parseFile(raw, startOffset, endOffset) {
   let binary = false;
   let modeChanged = false;
   let inBinaryPatch = false;
-  let binaryPatchSize = null;
-  let binaryPatchPayloadSeen = false;
+  let binaryBlockCount = 0;
+  let binaryBlockSize = null;
+  let binaryBlockHasPayload = false;
   let inHunk = false;
   let oldRemaining = 0;
   let newRemaining = 0;
@@ -95,11 +113,24 @@ function parseFile(raw, startOffset, endOffset) {
   for (let index = 1; index < clean.length; index += 1) {
     const line = clean[index];
     if (inBinaryPatch) {
-      if (binaryPatchSize === null) {
+      if (line === "") {
+        if (binaryBlockSize !== null) {
+          if (binaryBlockSize > 0n && !binaryBlockHasPayload) throw new Error("truncated Git binary patch");
+          binaryBlockSize = null;
+          binaryBlockHasPayload = false;
+        }
+        continue;
+      }
+      if (binaryBlockSize === null) {
+        if (binaryBlockCount === 2) throw new Error("unexpected data after Git binary patch blocks");
         const patchHeader = line.match(/^(?:literal|delta) ([0-9]+)$/);
         if (!patchHeader) throw new Error("invalid Git binary patch header");
-        binaryPatchSize = BigInt(patchHeader[1]);
-      } else if (line !== "") binaryPatchPayloadSeen = true;
+        binaryBlockCount += 1;
+        binaryBlockSize = BigInt(patchHeader[1]);
+      } else {
+        if (!isBinaryPatchLine(line)) throw new Error("invalid Git binary patch payload");
+        binaryBlockHasPayload = true;
+      }
       continue;
     }
     if (inHunk && oldRemaining === 0 && newRemaining === 0) inHunk = false;
@@ -137,7 +168,7 @@ function parseFile(raw, startOffset, endOffset) {
     if (line === "") continue;
     throw new Error("unrecognized unified diff metadata");
   }
-  if (inBinaryPatch && (binaryPatchSize === null || (binaryPatchSize > 0n && !binaryPatchPayloadSeen))) {
+  if (inBinaryPatch && (binaryBlockCount !== 2 || (binaryBlockSize > 0n && !binaryBlockHasPayload))) {
     throw new Error("truncated Git binary patch");
   }
   if (inHunk && (oldRemaining !== 0 || newRemaining !== 0)) throw new Error("truncated unified diff hunk");

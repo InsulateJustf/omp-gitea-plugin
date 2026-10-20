@@ -697,7 +697,9 @@ export default function teaissueExtension(pi) {
         try {
           parsed = parseUnifiedDiff(result.stdout);
         } catch (error) {
-          return toolError(`${error instanceof Error ? error.message : String(error)}\nThis resource requires gh-tea PR read support (pr list, pr view JSON, and pr diff); install a compatible gh-tea build.`);
+          const message = error instanceof Error ? error.message : String(error);
+          const diagnostic = message.startsWith("gh tea pr diff") ? message : `gh tea pr diff contract error: ${message}`;
+          return toolError(`${diagnostic}\nThis resource requires gh-tea PR read support (pr list, pr view JSON, and pr diff); install a compatible gh-tea build.`);
         }
         if (diff.mode === "all") return { content: [{ type: "text", text: parsed.text }] };
         if (diff.mode === "file") {
