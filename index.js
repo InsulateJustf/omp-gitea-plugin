@@ -210,6 +210,229 @@ function decodeQueryKey(value, scheme = "teaissue") {
   return decodeQueryValue(value, "query parameter", scheme);
 }
 
+const PR_DETAIL_FIELDS = "number,title,state,isDraft,url,createdAt,updatedAt,closedAt,author.login,labels[].name,baseRefName,headRefName,body,merged,mergedAt,mergeable,files";
+const PR_DISCUSSION_FIELDS = ",comments,reviews,reviewComments";
+
+function parseTeaprDetailUri(path) {
+  if (!/^teapr:/i.test(path)) return null;
+  if (!path.startsWith("teapr://") || path.includes("#")) return null;
+  const uri = path.slice("teapr://".length);
+  const queryIndex = uri.indexOf("?");
+  const pathPart = queryIndex === -1 ? uri : uri.slice(0, queryIndex);
+  const queryPart = queryIndex === -1 ? null : uri.slice(queryIndex + 1);
+  const rawSegments = pathPart.split("/");
+  if (pathPart === "" || (rawSegments.length !== 1 && rawSegments.length !== 3)) return null;
+  const segments = rawSegments.map((segment, index) => decodeSegment(segment, `path segment ${index + 1}`, "teapr"));
+  const rawNumber = segments.at(-1);
+  if (!/^[0-9]+$/.test(rawNumber)) {
+    throw new Error("Invalid teapr URI: pull request number must be a decimal integer");
+  }
+  const number = normalizePositiveInt64(rawNumber);
+  if (number === null) throw new Error(`Invalid teapr URI: pull request number must be in the range 1..${MAX_INT64}`);
+  let repo;
+  if (segments.length === 3) {
+    const [owner, name] = segments;
+    if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(name)) {
+      throw new Error("Invalid teapr URI: owner and repository may contain only letters, numbers, '.', '_' and '-'");
+    }
+    repo = `${owner}/${name}`;
+  }
+  const options = { number, repo, comments: true };
+  if (queryPart !== null) {
+    if (!queryPart) throw new Error("Invalid teapr URI: query must not be empty");
+    const seen = new Set();
+    for (const pair of queryPart.split("&")) {
+      const equals = pair.indexOf("=");
+      if (equals <= 0) throw new Error("Invalid teapr URI: malformed query parameter");
+      const key = decodeQueryKey(pair.slice(0, equals), "teapr");
+      const value = decodeQueryValue(pair.slice(equals + 1), `${key} value`, "teapr");
+      if (key !== "use" && key !== "comments") throw new Error(`Invalid teapr URI: unsupported ${key} parameter`);
+      if (seen.has(key)) throw new Error(`Invalid teapr URI: repeated ${key} parameter`);
+      seen.add(key);
+      if (!value) throw new Error(`Invalid teapr URI: empty ${key} value`);
+      if (key === "use") options.use = value;
+      else options.comments = value !== "0" && value.toLowerCase() !== "false";
+    }
+  }
+  return options;
+}
+
+function nullableTime(value, label) {
+  if (value !== null && (typeof value !== "string" || !isRfc3339(value))) {
+    throw new Error(`gh tea JSON contract error: ${label} must be RFC3339 or null`);
+  }
+  return value;
+}
+
+function nullableStringValue(value, label) {
+  if (value !== null && typeof value !== "string") {
+    throw new Error(`gh tea JSON contract error: ${label} must be a string or null`);
+  }
+  return value;
+}
+
+function validateAuthor(value, label) {
+  if (value === null) return null;
+  const login = string(required(object(value, label), "login", `${label}.login`), `${label}.login`);
+  return login;
+}
+
+function validatePrDetail(value, expectedNumber, commentsRequested) {
+  const pr = object(value, "root");
+  const number = positiveInt64(required(pr, "number"), "number");
+  if (number !== expectedNumber) throw new Error("gh tea JSON contract error: returned pull request number does not match the request");
+  const title = string(required(pr, "title"), "title");
+  const state = string(required(pr, "state"), "state");
+  if (!["open", "closed", "merged"].includes(state)) throw new Error("gh tea JSON contract error: state must be open, closed or merged");
+  const draft = required(pr, "isDraft");
+  if (draft !== null && typeof draft !== "boolean") throw new Error("gh tea JSON contract error: isDraft must be a boolean or null");
+  const url = nullableStringValue(required(pr, "url"), "url");
+  const createdAt = nullableTime(required(pr, "createdAt"), "createdAt");
+  const updatedAt = nullableTime(required(pr, "updatedAt"), "updatedAt");
+  const closedAt = nullableTime(required(pr, "closedAt"), "closedAt");
+  const author = validateAuthor(required(pr, "author"), "author");
+  const labels = requiredArray(required(pr, "labels"), "labels").map((entry, index) =>
+    string(required(object(entry, `labels[${index}]`), "name", `labels[${index}].name`), `labels[${index}].name`));
+  const baseRefName = nullableStringValue(required(pr, "baseRefName"), "baseRefName");
+  const headRefName = nullableStringValue(required(pr, "headRefName"), "headRefName");
+  const body = string(required(pr, "body"), "body");
+  const merged = required(pr, "merged");
+  if (typeof merged !== "boolean") throw new Error("gh tea JSON contract error: merged must be a boolean");
+  const mergedAt = nullableTime(required(pr, "mergedAt"), "mergedAt");
+  const mergeable = required(pr, "mergeable");
+  if (mergeable !== null && typeof mergeable !== "boolean") throw new Error("gh tea JSON contract error: mergeable must be a boolean or null");
+  const files = requiredArray(required(pr, "files"), "files").map((entry, index) => {
+    const label = `files[${index}]`;
+    const file = object(entry, label);
+    return {
+      path: string(required(file, "path", `${label}.path`), `${label}.path`),
+      previousPath: nullableStringValue(required(file, "previousPath", `${label}.previousPath`), `${label}.previousPath`),
+      status: string(required(file, "status", `${label}.status`), `${label}.status`),
+      additions: nonnegativeInteger(required(file, "additions", `${label}.additions`), `${label}.additions`),
+      deletions: nonnegativeInteger(required(file, "deletions", `${label}.deletions`), `${label}.deletions`),
+    };
+  });
+  let comments = null;
+  let reviews = null;
+  let reviewComments = null;
+  if (commentsRequested) {
+    comments = requiredArray(required(pr, "comments"), "comments").map((entry, index) => {
+      const label = `comments[${index}]`;
+      const item = object(entry, label);
+      return {
+        id: positiveInt64(required(item, "id", `${label}.id`), `${label}.id`),
+        author: validateAuthor(required(item, "author", `${label}.author`), `${label}.author`),
+        body: string(required(item, "body", `${label}.body`), `${label}.body`),
+        createdAt: nullableTime(required(item, "createdAt", `${label}.createdAt`), `${label}.createdAt`),
+        updatedAt: nullableTime(required(item, "updatedAt", `${label}.updatedAt`), `${label}.updatedAt`),
+        url: nullableStringValue(required(item, "url", `${label}.url`), `${label}.url`),
+      };
+    });
+    reviews = requiredArray(required(pr, "reviews"), "reviews").map((entry, index) => {
+      const label = `reviews[${index}]`;
+      const item = object(entry, label);
+      const flags = {};
+      for (const field of ["stale", "official", "dismissed"]) {
+        const flag = required(item, field, `${label}.${field}`);
+        if (typeof flag !== "boolean") throw new Error(`gh tea JSON contract error: ${label}.${field} must be a boolean`);
+        flags[field] = flag;
+      }
+      return {
+        id: positiveInt64(required(item, "id", `${label}.id`), `${label}.id`),
+        author: validateAuthor(required(item, "author", `${label}.author`), `${label}.author`),
+        body: string(required(item, "body", `${label}.body`), `${label}.body`),
+        state: string(required(item, "state", `${label}.state`), `${label}.state`),
+        submittedAt: nullableTime(required(item, "submittedAt", `${label}.submittedAt`), `${label}.submittedAt`),
+        commitOid: nullableStringValue(required(item, "commitOid", `${label}.commitOid`), `${label}.commitOid`),
+        url: nullableStringValue(required(item, "url", `${label}.url`), `${label}.url`),
+        ...flags,
+      };
+    });
+    reviewComments = requiredArray(required(pr, "reviewComments"), "reviewComments").map((entry, index) => {
+      const label = `reviewComments[${index}]`;
+      const item = object(entry, label);
+      return {
+        id: positiveInt64(required(item, "id", `${label}.id`), `${label}.id`),
+        reviewId: positiveInt64(required(item, "reviewId", `${label}.reviewId`), `${label}.reviewId`),
+        author: validateAuthor(required(item, "author", `${label}.author`), `${label}.author`),
+        body: string(required(item, "body", `${label}.body`), `${label}.body`),
+        createdAt: nullableTime(required(item, "createdAt", `${label}.createdAt`), `${label}.createdAt`),
+        updatedAt: nullableTime(required(item, "updatedAt", `${label}.updatedAt`), `${label}.updatedAt`),
+        url: nullableStringValue(required(item, "url", `${label}.url`), `${label}.url`),
+        path: nullableStringValue(required(item, "path", `${label}.path`), `${label}.path`),
+        position: nullableNonnegativeInteger(required(item, "position", `${label}.position`), `${label}.position`),
+        originalPosition: nullableNonnegativeInteger(required(item, "originalPosition", `${label}.originalPosition`), `${label}.originalPosition`),
+      };
+    });
+  }
+  return { number, title, state, draft, url, createdAt, updatedAt, closedAt, author, labels, baseRefName, headRefName, body, merged, mergedAt, mergeable, files, comments, reviews, reviewComments };
+}
+
+function nonnegativeInteger(value, label) {
+  if (!isLosslessNumber(value) || !/^(0|[1-9][0-9]*)$/.test(value.toString())) {
+    throw new Error(`gh tea JSON contract error: ${label} must be a non-negative integer`);
+  }
+  return value.toString();
+}
+
+function nullableNonnegativeInteger(value, label) {
+  return value === null ? null : nonnegativeInteger(value, label);
+}
+
+function renderPrDetail(pr, options) {
+  const lines = [
+    `# ${pr.number}: ${pr.title}`,
+    "",
+    `- Number: ${pr.number}`,
+    `- State: ${pr.state}`,
+    `- Draft: ${pr.draft === null ? "Missing" : pr.draft}`,
+    `- Author: ${displayMissing(pr.author)}`,
+    `- Base: ${displayMissing(pr.baseRefName)}`,
+    `- Head: ${displayMissing(pr.headRefName)}`,
+    `- Created: ${displayMissing(pr.createdAt)}`,
+    `- Updated: ${displayMissing(pr.updatedAt)}`,
+    `- Closed: ${displayMissing(pr.closedAt)}`,
+    `- Labels: ${pr.labels.length ? pr.labels.join(", ") : "none"}`,
+    `- URL: ${displayMissing(pr.url)}`,
+    `- Merged: ${pr.merged}`,
+    `- Merged at: ${displayMissing(pr.mergedAt)}`,
+    `- Mergeable: ${pr.mergeable === null ? "Missing" : pr.mergeable}`,
+    "",
+    "## Body", "",
+    pr.body,
+    "",
+    "## Files", "",
+  ];
+  const diffLink = options.repo ? `teapr://${options.repo}/${pr.number}/diff` : `teapr://${pr.number}/diff`;
+  const linkedDiff = options.use ? `${diffLink}?use=${encodeURIComponent(options.use)}` : diffLink;
+  if (pr.files.length === 0) lines.push("No changed files.");
+  else {
+    for (const file of pr.files.slice(0, 50)) {
+      lines.push(`- ${file.path}${file.previousPath === null ? "" : ` (previously ${file.previousPath})`} — ${file.status}; +${file.additions}/-${file.deletions}`);
+    }
+    if (pr.files.length > 50) lines.push(`- ${pr.files.length - 50} more files omitted.`);
+    lines.push(`- Diff: ${linkedDiff}`);
+  }
+  lines.push("", "## Reviews", "");
+  if (pr.reviews === null) lines.push("Reviews were not requested.");
+  else if (pr.reviews.length === 0) lines.push("No reviews.");
+  else for (const review of pr.reviews) {
+    lines.push(`### Review ${review.id}`, `- Author: ${displayMissing(review.author)}`, `- State: ${review.state}`, `- Submitted: ${displayMissing(review.submittedAt)}`, `- Commit: ${displayMissing(review.commitOid)}`, `- URL: ${displayMissing(review.url)}`, `- Stale: ${review.stale}; Official: ${review.official}; Dismissed: ${review.dismissed}`, "", review.body, "");
+  }
+  lines.push("## Review Comments", "");
+  if (pr.reviewComments === null) lines.push("Review comments were not requested.");
+  else if (pr.reviewComments.length === 0) lines.push("No review comments.");
+  else for (const comment of pr.reviewComments) {
+    lines.push(`### Review comment ${comment.id}`, `- Review ID: ${comment.reviewId}`, `- Author: ${displayMissing(comment.author)}`, `- Created: ${displayMissing(comment.createdAt)}`, `- Updated: ${displayMissing(comment.updatedAt)}`, `- URL: ${displayMissing(comment.url)}`, `- Path: ${displayMissing(comment.path)}`, `- Position: ${comment.position === null ? "Missing" : comment.position}`, `- Original position: ${comment.originalPosition === null ? "Missing" : comment.originalPosition}`, "", comment.body, "");
+  }
+  lines.push("## Comments", "");
+  if (pr.comments === null) lines.push("Comments were not requested.");
+  else if (pr.comments.length === 0) lines.push("No comments.");
+  else for (const comment of pr.comments) {
+    lines.push(`### Comment ${comment.id}`, `- Author: ${displayMissing(comment.author)}`, `- Created: ${displayMissing(comment.createdAt)}`, `- Updated: ${displayMissing(comment.updatedAt)}`, `- URL: ${displayMissing(comment.url)}`, "", comment.body, "");
+  }
+  return lines.join("\n");
+}
 const PR_LIST_FIELDS = "number,title,state,isDraft,url,createdAt,updatedAt,author.login,labels[].name,baseRefName,headRefName";
 
 function parseTeaprListUri(path) {
@@ -381,23 +604,58 @@ export default function teaissueExtension(pi) {
   pi.registerTool({
     name: "read",
     label: "Read",
-    description: `Read files, URLs, and native GitHub issue:// and pr:// resources normally. This extension handles teaissue://<number> (repository from the current session working directory) or teaissue://<owner>/<repo>/<number> (explicit repository), with optional use=<alias>; comments are requested by default, and comments=0 disables them (comments=1 requests them explicitly). Gitea PR lists use teapr:// or teapr://<owner>/<repo>, with optional state=open|closed|merged|all (default open), limit=<positive decimal> (default 30, maximum 100), author, label, and use filters. Gitea URI handling is available only through read in the loaded agent session; other paths are passed unchanged to native read.`,
+    description: `Read files, URLs, and native GitHub issue:// and pr:// resources normally. This extension handles teaissue://<number> (repository from the current session working directory) or teaissue://<owner>/<repo>/<number> (explicit repository), with optional use=<alias>; comments are requested by default, and comments=0 disables them (comments=1 requests them explicitly). Gitea PR lists use teapr:// or teapr://<owner>/<repo>, with optional state=open|closed|merged|all (default open), limit=<positive decimal> (default 30, maximum 100), author, label, and use filters. Gitea PR details use teapr://<number> or teapr://<owner>/<repo>/<number>, with optional use and comments parameters; discussion is included by default and comments=0 or comments=false disables it. Gitea URI handling is available only through read in the loaded agent session; other paths are passed unchanged to native read.`,
     parameters: pi.zod.object({ path: pi.zod.string() }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       let issue;
       let list;
+      let detail;
       try {
         if (typeof params.path !== "string") throw new Error("read path must be a string");
-        if (/^teapr:/i.test(params.path)) list = parseTeaprListUri(params.path);
-        else issue = parseIssueUri(params.path);
+        if (/^teapr:/i.test(params.path)) {
+          detail = parseTeaprDetailUri(params.path);
+          if (detail == null) list = parseTeaprListUri(params.path);
+        } else issue = parseIssueUri(params.path);
       } catch (error) {
         return toolError(error instanceof Error ? error.message : String(error));
       }
-      if (issue == null && list == null) {
+      if (issue == null && list == null && detail == null) {
         if (typeof ctx.invokeTool !== "function") return toolError("Native read delegation is unavailable in this OMP session.");
         return ctx.invokeTool(params);
       }
-      if (signal?.aborted) return toolError(list ? "gh tea pr list was cancelled before execution." : "gh tea issue view was cancelled before execution.");
+      if (signal?.aborted) return toolError(detail ? "gh tea pr view was cancelled before execution." : list ? "gh tea pr list was cancelled before execution." : "gh tea issue view was cancelled before execution.");
+      if (detail != null) {
+        const args = ["tea", "pr", "view", detail.number];
+        if (detail.repo !== undefined) args.push("--repo", detail.repo);
+        if (detail.use !== undefined) args.push("--use", detail.use);
+        args.push("--json", `${PR_DETAIL_FIELDS}${detail.comments ? PR_DISCUSSION_FIELDS : ""}`);
+        let result;
+        try {
+          result = await pi.exec("gh", args, { cwd: ctx.cwd, signal, timeout: 60000 });
+        } catch (error) {
+          return toolError(`Unable to execute gh tea pr view: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (result.killed || signal?.aborted) {
+          return toolError(`gh tea pr view was cancelled or timed out${result.stderr ? `: ${result.stderr}` : "."}`);
+        }
+        if (result.code !== 0) {
+          return toolError(`gh tea pr view exited with code ${result.code}${result.stderr ? `:\n${result.stderr}` : " (no stderr)"}\nThis resource requires gh-tea PR read support (pr list, pr view JSON, and pr diff); install a compatible gh-tea build.`);
+        }
+        let decoded;
+        try {
+          decoded = parse(result.stdout);
+        } catch (error) {
+          return toolError(`gh tea pr view JSON contract error: invalid or incomplete JSON (${error instanceof Error ? error.message : String(error)})\nThis resource requires gh-tea PR read support (pr list, pr view JSON, and pr diff); install a compatible gh-tea build.`);
+        }
+        try {
+          return { content: [{ type: "text", text: renderPrDetail(validatePrDetail(decoded, detail.number, detail.comments), detail) }] };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return toolError(message.includes("gh tea JSON contract error")
+            ? `gh tea pr view JSON contract error: ${message.replace(/^gh tea JSON contract error:\s*/, "")}\nThis resource requires gh-tea PR read support (pr list, pr view JSON, and pr diff); install a compatible gh-tea build.`
+            : message);
+        }
+      }
       if (list != null) {
         const args = ["tea", "pr", "list"];
         if (list.repo !== undefined) args.push("--repo", list.repo);

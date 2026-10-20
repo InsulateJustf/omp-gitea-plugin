@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Read Gitea issues and pull request lists through the native read tool in OMP agent sessions",
+  "description": "Read Gitea issues and pull request lists and details through the native read tool in OMP agent sessions",
   "omp": {
     "extensions": ["./index.js"]
   },
