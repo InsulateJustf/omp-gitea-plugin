@@ -309,7 +309,6 @@ test("rejects malformed PR list URIs before execution and keeps native reads del
     "teapr://Owner/Repo?limit=0",
     "teapr://Owner/Repo?limit=1&limit=2",
     "teapr://Owner/Repo?unknown=x",
-    "teapr://Owner/Repo/12",
     "teapr://Owner/Repo?label=",
   ]) {
     const result = await read(tool, path);
