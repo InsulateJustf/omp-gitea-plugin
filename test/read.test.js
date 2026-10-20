@@ -47,6 +47,43 @@ function text(result) {
   return result.content.map((part) => part.text).join("\n");
 }
 
+const listJson = `[{
+  "number": 12,
+  "title": "List title",
+  "state": "open",
+  "isDraft": true,
+  "url": "https://gitea.example/Owner/Repo/pulls/12",
+  "createdAt": "2026-10-14T08:00:00Z",
+  "updatedAt": "2026-10-14T09:00:00Z",
+  "author": { "login": "alice" },
+  "labels": [{ "name": "bug" }, { "name": "ready" }],
+  "baseRefName": "main",
+  "headRefName": "feature"
+}]`;
+
+test("lists PRs with bounded filters and links back to the selected URI", async () => {
+  const { tool, pi } = load({ stdout: listJson });
+  const result = await read(tool, "teapr://Owner/Repo?state=all&limit=200&author=alice&label=bug%2Cready&use=work");
+  assert.equal(result.isError, undefined);
+  assert.match(text(result), /PR #12: List title/);
+  assert.match(text(result), /State: open; draft: yes; author: alice; updated: 2026-10-14T09:00:00Z; labels: bug, ready/);
+  assert.match(text(result), /teapr:\/\/Owner\/Repo\/12\?use=work/);
+  assert.deepEqual(pi.execArgs[1], [
+    "tea", "pr", "list", "--repo", "Owner/Repo", "--use", "work",
+    "--state", "all", "--limit", "100", "--author", "alice", "--label", "bug,ready",
+    "--json", "number,title,state,isDraft,url,createdAt,updatedAt,author.login,labels[].name,baseRefName,headRefName",
+  ]);
+});
+
+test("uses default PR list filters and reports an empty result explicitly", async () => {
+  const { tool, pi } = load({ stdout: "[]" });
+  const result = await read(tool, "teapr://");
+  assert.equal(text(result), "No pull requests match the requested filters.\nRequested state: open; limit: 30.");
+  assert.deepEqual(pi.execArgs[1], [
+    "tea", "pr", "list", "--state", "open", "--limit", "30", "--json",
+    "number,title,state,isDraft,url,createdAt,updatedAt,author.login,labels[].name,baseRefName,headRefName",
+  ]);
+});
 test("reads full issue and losslessly renders int64 identifiers", async () => {
   const { tool } = load();
   const signal = new AbortController().signal;
@@ -265,3 +302,150 @@ test("keeps gh-tea selection and authentication diagnostics verbatim", async () 
     assert.match(text(result), /gh-tea.*0\.6\.0/i);
   }
 });
+test("rejects malformed PR list URIs before execution and keeps native reads delegated", async () => {
+  const { tool, pi } = load();
+  for (const path of [
+    "TEAPR://Owner/Repo?state=other",
+    "teapr://Owner/Repo?limit=0",
+    "teapr://Owner/Repo?limit=1&limit=2",
+    "teapr://Owner/Repo?unknown=x",
+    "teapr://Owner/Repo/12",
+    "teapr://Owner/Repo?label=",
+  ]) {
+    const result = await read(tool, path);
+    assert.equal(result.isError, true, path);
+  }
+  assert.equal(pi.execArgs, undefined);
+  const delegated = { content: [{ type: "text", text: "native" }] };
+  const native = await read(tool, "README.md", { cwd: "/work/repo", invokeTool: async () => delegated });
+  assert.equal(native, delegated);
+});
+test("uses teapr diagnostics for malformed encoding and rejects selectors before execution", async () => {
+  for (const path of ["teapr://Owner/Re%2Fpo", "teapr://?use=%"]) {
+    const { tool, pi } = load();
+    const result = await read(tool, path);
+    assert.equal(result.isError, true, path);
+    assert.match(text(result), /Invalid teapr URI/, path);
+    assert.doesNotMatch(text(result), /Invalid teaissue URI/, path);
+    assert.equal(pi.execArgs, undefined, path);
+  }
+});
+
+test("normalizes large PR limits and preserves short links and once-encoded use values", async () => {
+  const { tool, pi } = load({ stdout: listJson });
+  const result = await read(tool, "teapr://?state=closed&limit=000000000000000000000200&use=a%20b%25%2B");
+  assert.equal(result.isError, undefined, text(result));
+  assert.match(text(result), /teapr:\/\/12\?use=a%20b%25%2B/);
+  assert.deepEqual(pi.execArgs[1], [
+    "tea", "pr", "list", "--use", "a b%+", "--state", "closed", "--limit", "100",
+    "--json", "number,title,state,isDraft,url,createdAt,updatedAt,author.login,labels[].name,baseRefName,headRefName",
+  ]);
+});
+
+test("renders closed and merged PR states and explicit repository navigation", async () => {
+  const rows = ["closed", "merged"].map((state, index) => ({ ...JSON.parse(listJson)[0], number: index + 20, state }));
+  const result = await read(load({ stdout: JSON.stringify(rows) }).tool, "teapr://Owner/Repo?state=merged");
+  assert.equal(result.isError, undefined, text(result));
+  assert.match(text(result), /State: closed/);
+  assert.match(text(result), /State: merged/);
+  assert.match(text(result), /teapr:\/\/Owner\/Repo\/20/);
+  assert.match(text(result), /teapr:\/\/Owner\/Repo\/21/);
+});
+test("rejects malformed PR metadata and later corrupt entries atomically", async (t) => {
+  const nullMetadata = listJson.replace('"author": { "login": "alice" }', '"author": null')
+    .replace('"url": "https://gitea.example/Owner/Repo/pulls/12"', '"url": null')
+    .replace('"updatedAt": "2026-10-14T09:00:00Z"', '"updatedAt": null')
+    .replace('"isDraft": true', '"isDraft": null')
+    .replace('"baseRefName": "main"', '"baseRefName": null')
+    .replace('"headRefName": "feature"', '"headRefName": null');
+  const missing = await read(load({ stdout: nullMetadata }).tool, "teapr://");
+  assert.equal(missing.isError, undefined, text(missing));
+  assert.match(text(missing), /draft: Missing; author: Missing; updated: Missing/);
+  const invalids = [
+    ["malformed JSON", "[{"],
+    ["invalid author login", listJson.replace('"login": "alice"', '"login": 7')],
+    ["invalid update time", listJson.replace("2026-10-14T09:00:00Z", "yesterday")],
+    ["invalid base ref", listJson.replace('"baseRefName": "main"', '"baseRefName": 4')],
+    ["invalid draft", listJson.replace('"isDraft": true', '"isDraft": "true"')],
+  ];
+  for (const [name, stdout] of invalids) {
+    await t.test(name, async () => {
+      const result = await read(load({ stdout }).tool, "teapr://");
+      assert.equal(result.isError, true);
+      assert.match(text(result), /gh tea pr list JSON contract error/);
+      assert.doesNotMatch(text(result), /List title/);
+    });
+  }
+  const laterCorrupt = `[${listJson.slice(1, -1)},{"number":13}]`;
+  const result = await read(load({ stdout: laterCorrupt }).tool, "teapr://");
+  assert.equal(result.isError, true);
+  assert.doesNotMatch(text(result), /List title/);
+});
+
+test("names PR list execution failures and handles cancellation, timeout and truncation explicitly", async () => {
+  const { tool } = load({ code: 1, stderr: "denied" });
+  const failure = await read(tool, "teapr://");
+  assert.match(text(failure), /gh tea pr list exited with code 1/);
+  assert.match(text(failure), /denied/);
+  assert.match(text(failure), /gh-tea PR read support/);
+
+  const throwing = load();
+  throwing.pi.exec = async () => { throw new Error("spawn failure"); };
+  const thrown = await read(throwing.tool, "teapr://");
+  assert.match(text(thrown), /Unable to execute gh tea pr list: spawn failure/);
+
+  const cancelled = load({ killed: true, stderr: "signal" });
+  const cancelledResult = await read(cancelled.tool, "teapr://");
+  assert.match(text(cancelledResult), /gh tea pr list was cancelled or timed out: signal/);
+
+  const { resultHook } = load();
+  const truncated = resultHook({
+    toolName: "read",
+    input: { path: "teapr://" },
+    details: { meta: { truncation: { originalLength: 90000 } } },
+  });
+  assert.equal(truncated.isError, true);
+  assert.equal(text(truncated), "Gitea pull request result was truncated by OMP's output limit. The complete PR result is unavailable.");
+});
+test("preserves native file, HTTP, issue and PR read results without crossing into Gitea handling", async () => {
+  for (const [path, expected] of [
+    ["README.md", { content: [{ type: "text", text: "file" }], details: { path: "README.md" } }],
+    ["https://example.test", { content: [{ type: "text", text: "HTTP" }], isError: true, details: { status: 503 } }],
+    ["issue://owner/repo/1", { content: [{ type: "text", text: "issue" }], details: { source: "native issue" } }],
+    ["pr://owner/repo/1", { content: [{ type: "text", text: "PR" }], details: { source: "native PR" } }],
+  ]) {
+    let forwarded;
+    const { tool, pi } = load();
+    const result = await read(tool, path, {
+      cwd: "/work/repo",
+      invokeTool: async (params) => { forwarded = params; return expected; },
+    });
+    assert.deepEqual(forwarded, { path });
+    assert.equal(result, expected);
+    assert.equal(pi.execArgs, undefined);
+  }
+});
+
+test("reports an already-aborted PR read before invoking gh", async () => {
+  const { tool, pi } = load();
+  const controller = new AbortController();
+  controller.abort();
+  const result = await read(tool, "teapr://", { cwd: "/work/repo" }, controller.signal);
+  assert.equal(result.isError, true);
+  assert.match(text(result), /gh tea pr list was cancelled before execution/);
+  assert.equal(pi.execArgs, undefined);
+});
+test("keeps PR numbers lossless and rejects list contract errors atomically", async () => {
+  const maxNumber = listJson.replace('"number": 12', '"number": 9223372036854775807');
+  const maxRead = await read(load({ stdout: maxNumber }).tool, "teapr://");
+  assert.equal(maxRead.isError, undefined);
+  assert.match(text(maxRead), /PR #9223372036854775807:/);
+
+  const overflow = listJson.replace('"number": 12', '"number": 9223372036854775808');
+  const invalidRead = await read(load({ stdout: overflow }).tool, "teapr://");
+  assert.equal(invalidRead.isError, true);
+  assert.match(text(invalidRead), /positive int64 range/);
+  assert.doesNotMatch(text(invalidRead), /List title/);
+});
+
+
