@@ -126,7 +126,7 @@ test("rejects malformed fields and collection entries atomically", async (t) => 
 });
 
 test("rejects invalid detail URIs without execution", async () => {
-  for (const path of ["teapr://0", "teapr://9223372036854775808", "teapr://Owner/Repo/7/extra", "teapr://Owner/../7", "teapr://Owner/Repo/7#fragment", "teapr://Owner/Repo/7?unknown=x", "teapr://Owner/Repo/7?comments=0&comments=1", "teapr://Owner/Repo/7?use=", "teapr://Owner/Repo/7?comments=%ZZ", "teapr://Owner/Repo/7/diff/1"]) {
+  for (const path of ["teapr://0", "teapr://9223372036854775808", "teapr://Owner/Repo/7/extra", "teapr://Owner/../7", "teapr://Owner/Repo/7#fragment", "teapr://Owner/Repo/7?unknown=x", "teapr://Owner/Repo/7?comments=0&comments=1", "teapr://Owner/Repo/7?use=", "teapr://Owner/Repo/7?comments=%ZZ"]) {
     const { tool, pi } = load();
     const result = await read(tool, path);
     assert.equal(result.isError, true, path);
@@ -144,10 +144,16 @@ test("previews only 50 of 52 changed files and provides diff navigation", async 
 });
 
 test("preserves PR list dispatch alongside detail parsing", async () => {
-  for (const [path, args] of [["teapr://", ["tea", "pr", "list"]], ["teapr://123/diff?state=all", ["tea", "pr", "list", "--repo", "123/diff", "--state", "all", "--limit", "30"]]]) {
-    const { tool, pi } = load({ stdout: "[]" });
+  for (const [path, args, stdout = "[]"] of [
+    ["teapr://", ["tea", "pr", "list"]],
+    ["teapr://123/diff?use=fixture", ["tea", "pr", "diff", "123", "--use", "fixture"], "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"],
+    ["teapr://Owner/diff?state=all", ["tea", "pr", "list", "--repo", "Owner/diff", "--state", "all", "--limit", "30"]],
+    ["teapr://Owner/diff/12", ["tea", "pr", "view", "12", "--repo", "Owner/diff"], json({ number: 12 })],
+    ["teapr://123/%64iff?state=all", ["tea", "pr", "list", "--repo", "123/diff", "--state", "all", "--limit", "30"]],
+  ]) {
+    const { tool, pi } = load({ stdout });
     const output = await read(tool, path);
-    assert.equal(output.isError, undefined);
+    assert.equal(output.isError, undefined, path);
     assert.deepEqual(pi.execArgs[1].slice(0, args.length), args);
   }
 });
