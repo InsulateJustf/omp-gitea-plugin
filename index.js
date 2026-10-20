@@ -1,4 +1,6 @@
 import { isLosslessNumber, parse } from "lossless-json";
+import { parseUnifiedDiff } from "./diff.js";
+
 
 const MAX_INT64 = "9223372036854775807";
 const ISSUE_FIELDS = "number,title,state,url,createdAt,updatedAt,closedAt,author.login,labels[].name,assignees[].login,milestone.title,body,isPullRequest";
@@ -255,6 +257,42 @@ function parseTeaprDetailUri(path) {
     }
   }
   return options;
+}
+
+function parseTeaprDiffUri(path) {
+  if (!/^teapr:/i.test(path)) return null;
+  if (!path.startsWith("teapr://") || path.includes("#")) {
+    if (/\/diff(?:\/|$)/i.test(path)) throw new Error("Invalid teapr URI: malformed diff URI");
+    return null;
+  }
+  const uri = path.slice("teapr://".length);
+  const queryIndex = uri.indexOf("?");
+  const pathPart = queryIndex === -1 ? uri : uri.slice(0, queryIndex);
+  const queryPart = queryIndex === -1 ? null : uri.slice(queryIndex + 1);
+  const route = pathPart.match(/^(.*)\/diff(?:\/(all|[0-9]+))?$/);
+  if (!route) {
+    if (/\/diff(?::|\/|$)/.test(pathPart)) throw new Error("Invalid teapr URI: malformed diff route");
+    return null;
+  }
+  const detailSegments = route[1].split("/");
+  const shortRoute = detailSegments.length === 1 && /^[0-9]+$/.test(detailSegments[0]);
+  const explicitRoute = detailSegments.length === 3 && /^[0-9]+$/.test(detailSegments[2]);
+  if (!shortRoute && !explicitRoute) return null;
+  const detail = parseTeaprDetailUri(`teapr://${route[1]}${queryPart === null ? "" : `?${queryPart}`}`);
+  if (!detail) throw new Error("Invalid teapr URI: diff route requires a pull request number");
+  if (queryPart !== null) {
+    for (const pair of queryPart.split("&")) {
+      const equals = pair.indexOf("=");
+      const key = equals < 0 ? "" : decodeQueryKey(pair.slice(0, equals), "teapr");
+      if (key !== "use") throw new Error(`Invalid teapr URI: unsupported ${key || "query"} parameter`);
+    }
+  }
+  let index = null;
+  if (route[2] && route[2].toLowerCase() !== "all") {
+    if (BigInt(route[2]) < 1n) throw new Error("Invalid teapr URI: diff index must be a positive decimal integer");
+    index = route[2];
+  }
+  return { ...detail, mode: route[2] == null ? "files" : route[2].toLowerCase() === "all" ? "all" : "file", index };
 }
 
 function nullableTime(value, label) {
@@ -527,6 +565,18 @@ function renderPrList(prs, options) {
   }).join("\n\n")}`;
 }
 
+function renderPrDiff(files, options) {
+  if (!files.length) return "No file changes.";
+  return files.map((file, index) => {
+    const link = options.repo
+      ? `teapr://${options.repo}/${options.number}/diff/${index + 1}`
+      : `teapr://${options.number}/diff/${index + 1}`;
+    const url = options.use ? `${link}?use=${encodeURIComponent(options.use)}` : link;
+    const rename = file.oldPath ? ` (from ${file.oldPath})` : "";
+    return `${index + 1}. ${file.changeType}: ${file.path}${rename} (+${file.additions} -${file.deletions})\n${url}`;
+  }).join("\n\n") + "\n\nIndices refer to this diff read; PR updates may reorder files. Re-read /diff before following an index.";
+}
+
 function parseIssueUri(path) {
   if (!/^teaissue:/i.test(path)) return null;
   const invalid = () => { throw new Error("Invalid teaissue URI: expected teaissue://<issue number> or teaissue://<owner>/<repo>/<issue number>"); };
@@ -604,26 +654,69 @@ export default function teaissueExtension(pi) {
   pi.registerTool({
     name: "read",
     label: "Read",
-    description: `Read files, URLs, and native GitHub issue:// and pr:// resources normally. This extension handles teaissue://<number> (repository from the current session working directory) or teaissue://<owner>/<repo>/<number> (explicit repository), with optional use=<alias>; comments are requested by default, and comments=0 disables them (comments=1 requests them explicitly). Gitea PR lists use teapr:// or teapr://<owner>/<repo>, with optional state=open|closed|merged|all (default open), limit=<positive decimal> (default 30, maximum 100), author, label, and use filters. Gitea PR details use teapr://<number> or teapr://<owner>/<repo>/<number>, with optional use and comments parameters; discussion is included by default and comments=0 or comments=false disables it. Gitea URI handling is available only through read in the loaded agent session; other paths are passed unchanged to native read.`,
+    description: `Read files, URLs, and native GitHub issue:// and pr:// resources normally. This extension handles teaissue://<number> (repository from the current session working directory) or teaissue://<owner>/<repo>/<number> (explicit repository), with optional use=<alias>; comments are requested by default, and comments=0 disables them (comments=1 requests them explicitly). Gitea PR lists use teapr:// or teapr://<owner>/<repo>, with optional state=open|closed|merged|all (default open), limit=<positive decimal> (default 30, maximum 100), author, label, and use filters. Gitea PR details use teapr://<number> or teapr://<owner>/<repo>/<number>, with optional use and comments parameters; discussion is included by default and comments=0 or comments=false disables it. PR diffs use teapr://<number>/diff, /diff/all, or /diff/<positive file index>, with optional explicit owner/repo and use=<alias>; /diff lists files and per-file links, /diff/all returns the original diff, and /diff/I returns an exact file segment. File indices refer to the current diff and should be refreshed from /diff before use. Gitea URI handling is available only through read in the loaded agent session; other paths are passed unchanged to native read.`,
     parameters: pi.zod.object({ path: pi.zod.string() }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       let issue;
       let list;
       let detail;
+      let diff;
       try {
         if (typeof params.path !== "string") throw new Error("read path must be a string");
         if (/^teapr:/i.test(params.path)) {
-          detail = parseTeaprDetailUri(params.path);
-          if (detail == null) list = parseTeaprListUri(params.path);
+          diff = parseTeaprDiffUri(params.path);
+          if (diff == null) {
+            detail = parseTeaprDetailUri(params.path);
+            if (detail == null) list = parseTeaprListUri(params.path);
+          }
         } else issue = parseIssueUri(params.path);
       } catch (error) {
         return toolError(error instanceof Error ? error.message : String(error));
       }
-      if (issue == null && list == null && detail == null) {
+      if (issue == null && list == null && detail == null && diff == null) {
         if (typeof ctx.invokeTool !== "function") return toolError("Native read delegation is unavailable in this OMP session.");
         return ctx.invokeTool(params);
       }
-      if (signal?.aborted) return toolError(detail ? "gh tea pr view was cancelled before execution." : list ? "gh tea pr list was cancelled before execution." : "gh tea issue view was cancelled before execution.");
+      if (signal?.aborted) {
+        const command = diff ? "gh tea pr diff" : detail ? "gh tea pr view" : list ? "gh tea pr list" : "gh tea issue view";
+        return toolError(`${command} was cancelled before execution.`);
+      }
+      if (diff != null) {
+        const args = ["tea", "pr", "diff", diff.number];
+        if (diff.repo !== undefined) args.push("--repo", diff.repo);
+        if (diff.use !== undefined) args.push("--use", diff.use);
+        let result;
+        try {
+          result = await pi.exec("gh", args, { cwd: ctx.cwd, signal, timeout: 60000 });
+        } catch (error) {
+          return toolError(`Unable to execute gh tea pr diff: ${error instanceof Error ? error.message : String(error)}\nThis resource requires gh-tea PR read support (pr list, pr view JSON, and pr diff); install a compatible gh-tea build.`);
+        }
+        if (result.killed || signal?.aborted) {
+          return toolError(`gh tea pr diff was cancelled or timed out${result.stderr ? `: ${result.stderr}` : "."}`);
+        }
+        if (result.code !== 0) {
+          return toolError(`gh tea pr diff exited with code ${result.code}${result.stderr ? `:\n${result.stderr}` : " (no stderr)"}\nThis resource requires gh-tea PR read support (pr list, pr view JSON, and pr diff); install a compatible gh-tea build.`);
+        }
+        let parsed;
+        try {
+          parsed = parseUnifiedDiff(result.stdout);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const diagnostic = message.startsWith("gh tea pr diff") ? message : `gh tea pr diff contract error: ${message}`;
+          return toolError(`${diagnostic}\nThis resource requires gh-tea PR read support (pr list, pr view JSON, and pr diff); install a compatible gh-tea build.`);
+        }
+        if (diff.mode === "all") return { content: [{ type: "text", text: parsed.text }] };
+        if (diff.mode === "file") {
+          const requested = BigInt(diff.index);
+          const navigation = `teapr://${diff.repo ? `${diff.repo}/` : ""}${diff.number}/diff${diff.use ? `?use=${encodeURIComponent(diff.use)}` : ""}`;
+          if (requested > BigInt(parsed.files.length)) {
+            return toolError(`PR diff file index ${diff.index} is out of range; this diff has ${parsed.files.length} files. Re-read ${navigation} to navigate.`);
+          }
+          const file = parsed.files[Number(requested - 1n)];
+          return { content: [{ type: "text", text: parsed.text.slice(file.startOffset, file.endOffset) }] };
+        }
+        return { content: [{ type: "text", text: renderPrDiff(parsed.files, diff) }] };
+      }
       if (detail != null) {
         const args = ["tea", "pr", "view", detail.number];
         if (detail.repo !== undefined) args.push("--repo", detail.repo);
