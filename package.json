@@ -1,9 +1,13 @@
 {
   "name": "omp-gitea-issue-read",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Read Gitea issues and pull request lists and details through the native read tool in OMP agent sessions",
+  "description": "Read Gitea issues and pull request lists, details, and raw diffs through the native read tool in OMP agent sessions",
+  "files": [
+    "index.js",
+    "diff.js"
+  ],
   "omp": {
     "extensions": ["./index.js"]
   },
@@ -11,9 +15,10 @@
     "node": ">=20"
   },
   "scripts": {
+    "build": "pnpm pack --pack-destination dist",
     "test": "node --test"
   },
   "dependencies": {
-    "lossless-json": "^4.3.1"
+    "lossless-json": "4.3.1"
   }
 }

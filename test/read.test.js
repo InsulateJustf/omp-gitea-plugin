@@ -477,6 +477,20 @@ test("reads exact raw PR diffs and links files back to the selected diff", async
   assert.ok(text(navigation).toLowerCase().includes("re-read /diff"));
 });
 
+test("decodes explicit PR diff numbers once before routing", async () => {
+  const raw = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n";
+  const { tool } = load({ stdout: raw });
+  const base = "teapr://Owner/Repo/%30%31/diff";
+  assert.equal(text(await read(tool, `${base}/all?use=work`)), raw);
+  assert.equal(text(await read(tool, `${base}/1?use=work`)), raw);
+  assert.match(text(await read(tool, `${base}?use=work`)), /teapr:\/\/Owner\/Repo\/1\/diff\/1\?use=work/);
+
+  const invalid = load({ stdout: raw });
+  const result = await read(invalid.tool, "teapr://Owner/Repo/%2531/diff/all");
+  assert.equal(result.isError, true);
+  assert.equal(invalid.pi.execArgs, undefined);
+});
+
 test("rejects malformed PR diff and unsafe indices before backend execution", async () => {
   for (const path of ["TEAPR://12/diff", "teapr://12/diff:raw", "teapr://12/diff/0", "teapr://12/diff/1/extra",
     "teapr://12/diff/all?use=", "teapr://12/diff?use=a&use=b", "teapr://12/diff/all#part",

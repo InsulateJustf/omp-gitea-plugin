@@ -276,7 +276,7 @@ function parseTeaprDiffUri(path) {
   }
   const detailSegments = route[1].split("/");
   const shortRoute = detailSegments.length === 1 && /^[0-9]+$/.test(detailSegments[0]);
-  const explicitRoute = detailSegments.length === 3 && /^[0-9]+$/.test(detailSegments[2]);
+  const explicitRoute = detailSegments.length === 3;
   if (!shortRoute && !explicitRoute) return null;
   const detail = parseTeaprDetailUri(`teapr://${route[1]}${queryPart === null ? "" : `?${queryPart}`}`);
   if (!detail) throw new Error("Invalid teapr URI: diff route requires a pull request number");

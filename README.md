@@ -6,34 +6,55 @@ An OMP extension that wraps the session's native `read` tool for `teaissue:` URI
 
 | Component | Requirement / verified baseline | Evidence / boundary |
 | --- | --- | --- |
-| OMP | 18.8.7 verified; no other version claimed | Actual package-directory loading and normal-session read verified with `/opt/homebrew/bin/omp`; no remote install path is claimed. |
+| OMP | 18.8.7 verified; no other version claimed | Actual package-directory loading, local archive extraction and local plugin linking verified with `/opt/homebrew/bin/omp`; no registry or remote install path is claimed. |
 | gh-tea | v0.6.0 for Issue JSON; PR reads require `pr list`, `pr view --json` and `pr diff` support | Observed PR backend: v0.7.1, VCS `6d73b9a3d976b65858750dcfc1d6d67d3d85d71d`, darwin/arm64 (list build Go 1.26.0; temporary detail-verification build Go 1.27.1, `vcs.modified=false`). Repository resolution, authentication, pagination and filtering belong to gh-tea. No minimum PR-support release or unobserved build is claimed. |
 | Node.js | `package.json` requires 20+ | Runtime requirement; not an independent support-version claim. |
 
 The package manifest declares `omp.extensions: ["./index.js"]`. Runtime dependency `lossless-json` is installed with the package; the extension uses the public ExtensionAPI supplied at load time and does not import OMP internals.
 
-## Local install and load
+## Build and install release 0.2.0
 
-Install the package runtime dependencies from its directory (pnpm and the frozen lockfile are used here):
+The package keeps its existing name, `omp-gitea-issue-read`, and now includes Issue reads plus PR lists, details and raw diffs. It remains private: this release is a local installable archive, not an npm registry publication.
+
+From a checkout with Node.js 20+ and pnpm available:
 
 ```sh
-cd /absolute/path/to/omp-gitea-plugin
-pnpm install --prod --frozen-lockfile
+pnpm install --frozen-lockfile
+pnpm test
+pnpm build
 ```
 
-In a normal agent session, load that package directory explicitly. This invocation disables discovery and other ambient tools/extensions while still loading the explicit package:
+The build creates `dist/omp-gitea-issue-read-0.2.0.tgz`. The archive includes the extension entry, diff parser, manifest and this README; it excludes tests, planning artifacts, installed dependencies and the checkout's pnpm lockfile. Its only runtime dependency is pinned to `lossless-json` 4.3.1 in the manifest. Installation requires registry access or an existing pnpm store.
+
+Extract the archive into a permanent directory, install its production dependency, then register that directory with OMP:
+
+```sh
+ARCHIVE=/absolute/path/to/omp-gitea-issue-read-0.2.0.tgz
+INSTALL_DIR="$HOME/.local/share/omp-gitea-issue-read-0.2.0"
+mkdir -p "$INSTALL_DIR"
+tar -xzf "$ARCHIVE" -C "$INSTALL_DIR" --strip-components=1
+pnpm --dir "$INSTALL_DIR" install --prod
+omp install "$INSTALL_DIR"
+omp plugin list --json
+```
+
+OMP 18.8.7 treats a local package directory as a plugin link. Keep `INSTALL_DIR` in place; moving or deleting it breaks that installation. Installing the same package name replaces its existing link. Do not load a checkout and the installed package simultaneously, or combine it with another extension wrapping `read`: wrapper composition is not guaranteed.
+
+For one session without persistent registration, or to load a development checkout after `pnpm install --prod --frozen-lockfile`, pass the package directory explicitly:
 
 ```sh
 /opt/homebrew/bin/omp \
   --no-extensions --no-skills --no-rules --no-session --no-lsp --no-title \
   --tools read --mode json --cwd /tmp \
-  --extension /absolute/path/to/omp-gitea-plugin \
-  -p 'Use the read tool to retrieve teaissue://InsulateJustf/emby-pgsql/3?use=justf&comments=1. Report the exact title, whether the complete original body was returned, and the number of comments returned.'
+  --extension /absolute/path/to/installed-package-directory \
+  -p 'Call read directly for teapr://InsulateJustf/testrepo/1?use=justf and teapr://InsulateJustf/testrepo/1/diff?use=justf. Follow a returned single-file diff link.'
 ```
 
-This exact flow was exercised with OMP 18.8.7 and the package directory after `pnpm install --prod --frozen-lockfile`; the model called the session `read`, and the tool result contained the real Gitea issue metadata, full body, and both comments. The model identified the title and reported both comments. The repository path in these commands is a placeholder for the local clone path. The command's `/opt/homebrew/bin/omp` is the verified macOS binary path; use only an OMP version verified separately.
+The example uses the existing authorized verification repository and Tea alias; substitute a readable PR and an existing alias for your deployment. `gh` and a compatible authenticated `gh-tea` must be available on `PATH`. The verified OMP binary is `/opt/homebrew/bin/omp` on macOS; other OMP versions require separate verification.
 
-`gh` and the `gh-tea` extension must be installed and available on `PATH`, gh-tea must be authenticated, and the selected instance/repository must resolve. This guide documents local package loading, not a remote package install command. If another extension also wraps `read`, do not load it alongside this one: wrapper composition is not guaranteed.
+Release verification uses a clean extraction, production-only dependency installation, local plugin linking in an isolated HOME, and actual OMP 18.8.7 model-driven `read` calls from the extracted package against the real Gitea PR. No user plugin installation is required by the build.
+
+Release 0.2.0 also fixes explicit-repository diff routes containing once-percent-encoded PR numbers, such as `teapr://Owner/Repo/%31/diff/all`. Double-encoded numbers remain invalid; the documented literal numeric-owner/repository precedence below is unchanged.
 
 ## URI use
 

@@ -11,3 +11,4 @@
 .Trashes/
 .fseventsd/
 node_modules/
+dist/
