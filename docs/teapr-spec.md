@@ -44,7 +44,7 @@ Use public ExtensionAPI only, keep read parameters `{ path: string }`, existing 
 | Single PR + /diff/all | Original unified diff | use |
 | Single PR + /diff/I | Original file segment, I starts at 1 | use |
 
-The literal numeric short form `teapr://N/diff` is reserved for PR diff navigation (only `use` is allowed). Consequently, a repository named `diff` under a numeric owner uses an encoded segment such as `teapr://123/%64iff` for list reads; named-owner `teapr://Owner/diff`, `teapr://Owner/Diff`, and `teapr://Owner/diff/12` remain repository list and detail routes.
+The literal numeric short form `teapr://N/diff` is reserved for PR diff navigation (only `use` is allowed). Consequently, a repository named `diff` under a numeric owner uses an encoded segment such as `teapr://123/%64iff` for list reads; named-owner `teapr://Owner/diff`, `teapr://Owner/Diff`, plus numeric-owner `teapr://123/Diff` remain list routes, and `teapr://Owner/diff/12` remains a detail route.
 
 List defaults open/30, state open|closed|merged|all, positive decimal limit clamped at 100 after lossless comparison. Author/label are nonempty single filter values; comma-separated labels match all names. Detail includes discussion by default; comments=0 or case-insensitive false disables all three collections; any other nonempty value enables them. This does not change teaissue's existing 0|1 rule. Diff indices remain decimal strings until range-checked against file count; out-of-range errors include count and /diff navigation.
 
