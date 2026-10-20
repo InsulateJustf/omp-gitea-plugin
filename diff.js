@@ -85,6 +85,8 @@ function parseFile(raw, startOffset, endOffset) {
   let binary = false;
   let modeChanged = false;
   let inBinaryPatch = false;
+  let binaryPatchSize = null;
+  let binaryPatchPayloadSeen = false;
   let inHunk = false;
   let oldRemaining = 0;
   let newRemaining = 0;
@@ -92,7 +94,14 @@ function parseFile(raw, startOffset, endOffset) {
   let deletions = 0;
   for (let index = 1; index < clean.length; index += 1) {
     const line = clean[index];
-    if (inBinaryPatch) continue;
+    if (inBinaryPatch) {
+      if (binaryPatchSize === null) {
+        const patchHeader = line.match(/^(?:literal|delta) ([0-9]+)$/);
+        if (!patchHeader) throw new Error("invalid Git binary patch header");
+        binaryPatchSize = BigInt(patchHeader[1]);
+      } else if (line !== "") binaryPatchPayloadSeen = true;
+      continue;
+    }
     if (inHunk && oldRemaining === 0 && newRemaining === 0) inHunk = false;
     if (inHunk) {
       if (line.startsWith("\\ ")) continue;
@@ -127,6 +136,9 @@ function parseFile(raw, startOffset, endOffset) {
     if (/^(?:index |similarity index |dissimilarity index )/.test(line) || line === "\\ No newline at end of file") continue;
     if (line === "") continue;
     throw new Error("unrecognized unified diff metadata");
+  }
+  if (inBinaryPatch && (binaryPatchSize === null || (binaryPatchSize > 0n && !binaryPatchPayloadSeen))) {
+    throw new Error("truncated Git binary patch");
   }
   if (inHunk && (oldRemaining !== 0 || newRemaining !== 0)) throw new Error("truncated unified diff hunk");
   if (hasOldHeader !== hasNewHeader || (!hasOldHeader && !renamed && !added && !deleted && !binary && !modeChanged)) throw new Error("diff segment has no usable file headers");

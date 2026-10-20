@@ -497,7 +497,12 @@ test("fails closed for empty-index, malformed, and truncated raw diff output", a
   assert.equal(text(await read(empty.tool, "teapr://12/diff")), "No file changes.");
   assert.equal(text(await read(empty.tool, "teapr://12/diff/all")), "");
   assert.match(text(await read(empty.tool, "teapr://12/diff/1")), /out of range.*0 files/i);
-  for (const raw of ["not a diff", "diff --git a/x b/x\n", "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n"]) {
+  for (const raw of [
+    "not a diff",
+    "diff --git a/x b/x\n",
+    "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n",
+    "diff --git a/image b/image\nGIT binary patch\n",
+  ]) {
     const result = await read(load({ stdout: raw }).tool, "teapr://12/diff/all");
     assert.equal(result.isError, true, raw);
   }
