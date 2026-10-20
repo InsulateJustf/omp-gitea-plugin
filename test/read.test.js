@@ -506,6 +506,10 @@ test("fails closed for empty-index, malformed, and truncated raw diff output", a
     "diff --git a/image b/image\nGIT binary patch\nliteral 3\nA00000\n\nliteral 0\n\n",
     "diff --git a/image b/image\nGIT binary patch\nliteral 8\nPcmZQ@^7Lb5VrBpU1tI|8\n\nliteral 0\n\n",
     "diff --git a/image b/image\nGIT binary patch\ndelta 3\nKc${NqW&i*H5&#DP\n\nliteral 0\nHcmV?d00001\n\n",
+    "diff --git a/old b/new\nsimilarity index 100%\nrename from old\n",
+    "diff --git a/old b/new\nsimilarity index 100%\nrename to new\n",
+    "diff --git a/x b/x\nold mode 100644\n",
+    "diff --git a/x b/x\nnew mode 100755\n",
   ]) {
     const result = await read(load({ stdout: raw }).tool, "teapr://12/diff/all");
     assert.equal(result.isError, true, raw);
@@ -521,7 +525,9 @@ test("decodes quoted Unicode paths and classifies rename, mode, and binary chang
   const binary = "diff --git a/image b/image\nGIT binary patch\nliteral 8\nPcmZQ@^7Lb5VrBpU1tI|8\n\nliteral 0\nHcmV?d00001\n\n";
   const delta = "diff --git a/delta-image b/delta-image\nGIT binary patch\ndelta 6\nNc${NqX3k432LJ-T0aO40\n\nliteral 0\nHcmV?d00001\n\n";
   const differ = "diff --git a/other-image b/other-image\nBinary files a/other-image and b/other-image differ\n";
-  const raw = [quoted, rename, mode, deleted, binary, differ, delta].join("");
+  const emptyAddition = "diff --git a/empty b/empty\nnew file mode 100644\n";
+  const emptyDeletion = "diff --git a/empty-gone b/empty-gone\ndeleted file mode 100644\n";
+  const raw = [quoted, rename, mode, deleted, binary, differ, delta, emptyAddition, emptyDeletion].join("");
   const { tool } = load({ stdout: raw });
   const listing = text(await read(tool, "teapr://12/diff"));
   assert.ok(listing.includes("1. modified: space é \"x\".txt (+2 -2)"));
@@ -531,6 +537,8 @@ test("decodes quoted Unicode paths and classifies rename, mode, and binary chang
   assert.ok(listing.includes("5. binary: image (+0 -0)"));
   assert.ok(listing.includes("7. binary: delta-image (+0 -0)"));
   assert.ok(listing.includes("6. binary: other-image (+0 -0)"));
+  assert.ok(listing.includes("8. added: empty (+0 -0)"));
+  assert.ok(listing.includes("9. deleted: empty-gone (+0 -0)"));
   const selected = await read(tool, "teapr://12/diff/1");
   assert.equal(text(selected), quoted);
 });

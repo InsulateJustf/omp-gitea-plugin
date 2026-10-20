@@ -216,8 +216,12 @@ function parseFile(raw, startOffset, endOffset) {
   let added = false;
   let deleted = false;
   let renamed = false;
-  let binary = false;
+  let renameFromSeen = false;
+  let renameToSeen = false;
+  let oldModeSeen = false;
+  let newModeSeen = false;
   let modeChanged = false;
+  let binary = false;
   let inBinaryPatch = false;
   let binaryBlockCount = 0;
   let binaryBlockSize = null;
@@ -271,7 +275,8 @@ function parseFile(raw, startOffset, endOffset) {
       inHunk = oldRemaining !== 0 || newRemaining !== 0;
       continue;
     }
-    if (/^(?:old mode|new mode) /.test(line)) { modeChanged = true; continue; }
+    if (line.startsWith("old mode ")) { oldModeSeen = true; modeChanged = true; continue; }
+    if (line.startsWith("new mode ")) { newModeSeen = true; modeChanged = true; continue; }
     if (/^(?:new file mode|deleted file mode) /.test(line)) {
       if (line.startsWith("new file mode ")) added = true;
       else deleted = true;
@@ -290,8 +295,8 @@ function parseFile(raw, startOffset, endOffset) {
       hasNewHeader = true;
       continue;
     }
-    if (line.startsWith("rename from ")) { oldPath = pathHeader(line, "rename from "); renamed = true; continue; }
-    if (line.startsWith("rename to ")) { path = pathHeader(line, "rename to "); renamed = true; continue; }
+    if (line.startsWith("rename from ")) { oldPath = pathHeader(line, "rename from "); renamed = true; renameFromSeen = true; continue; }
+    if (line.startsWith("rename to ")) { path = pathHeader(line, "rename to "); renamed = true; renameToSeen = true; continue; }
     if (line === "GIT binary patch") { binary = true; inBinaryPatch = true; continue; }
     if (line.startsWith("Binary files ") && line.endsWith(" differ")) { binary = true; continue; }
     if (/^(?:index |similarity index |dissimilarity index )/.test(line) || line === "\\ No newline at end of file") continue;
@@ -304,6 +309,9 @@ function parseFile(raw, startOffset, endOffset) {
     if (binaryBlockCount !== 2) throw new Error("truncated Git binary patch");
   }
   if (inHunk && (oldRemaining !== 0 || newRemaining !== 0)) throw new Error("truncated unified diff hunk");
+  if (renameFromSeen !== renameToSeen) throw new Error("incomplete Git rename metadata");
+  if (oldModeSeen !== newModeSeen) throw new Error("incomplete Git mode change metadata");
+
   if (hasOldHeader !== hasNewHeader || (hasOldHeader && !hasHunk) || (hasHunk && (!hasOldHeader || !hasNewHeader)) ||
     (!hasOldHeader && !renamed && !added && !deleted && !binary && !modeChanged)) {
     throw new Error("diff segment has no usable file headers or complete text hunks");
