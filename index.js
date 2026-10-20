@@ -271,9 +271,13 @@ function parseTeaprDiffUri(path) {
   const queryPart = queryIndex === -1 ? null : uri.slice(queryIndex + 1);
   const route = pathPart.match(/^(.*)\/diff(?:\/(all|[0-9]+))?$/);
   if (!route) {
-    if (/\/diff(?::|\/|$)/i.test(pathPart)) throw new Error("Invalid teapr URI: malformed diff route");
+    if (/\/diff(?::|\/|$)/.test(pathPart)) throw new Error("Invalid teapr URI: malformed diff route");
     return null;
   }
+  const detailSegments = route[1].split("/");
+  const shortRoute = detailSegments.length === 1 && /^[0-9]+$/.test(detailSegments[0]);
+  const explicitRoute = detailSegments.length === 3 && /^[0-9]+$/.test(detailSegments[2]);
+  if (!shortRoute && !explicitRoute) return null;
   const detail = parseTeaprDetailUri(`teapr://${route[1]}${queryPart === null ? "" : `?${queryPart}`}`);
   if (!detail) throw new Error("Invalid teapr URI: diff route requires a pull request number");
   if (queryPart !== null) {
@@ -285,7 +289,7 @@ function parseTeaprDiffUri(path) {
   }
   let index = null;
   if (route[2] && route[2].toLowerCase() !== "all") {
-    if (!/^[0-9]+$/.test(route[2]) || BigInt(route[2]) < 1n) throw new Error("Invalid teapr URI: diff index must be a positive decimal integer");
+    if (BigInt(route[2]) < 1n) throw new Error("Invalid teapr URI: diff index must be a positive decimal integer");
     index = route[2];
   }
   return { ...detail, mode: route[2] == null ? "files" : route[2].toLowerCase() === "all" ? "all" : "file", index };

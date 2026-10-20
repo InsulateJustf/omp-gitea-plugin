@@ -478,9 +478,9 @@ test("reads exact raw PR diffs and links files back to the selected diff", async
 });
 
 test("rejects malformed PR diff and unsafe indices before backend execution", async () => {
-  for (const path of ["TEAPR://12/diff", "teapr://12/Diff", "teapr://12/diff:raw", "teapr://12/diff/0", "teapr://12/diff/1/extra",
+  for (const path of ["TEAPR://12/diff", "teapr://12/diff:raw", "teapr://12/diff/0", "teapr://12/diff/1/extra",
     "teapr://12/diff/all?use=", "teapr://12/diff?use=a&use=b", "teapr://12/diff/all#part",
-    "teapr://12/diff/%ZZ", "teapr://12/diff/all?raw=1"]) {
+    "teapr://12/diff/%ZZ", "teapr://12/diff/all?raw=1", "teapr://12/diff?state=all"]) {
     const { tool, pi } = load({ stdout: "diff --git a/x b/x\n" });
     const result = await read(tool, path);
     assert.equal(result.isError, true, path);
@@ -499,10 +499,12 @@ test("fails closed for empty-index, malformed, and truncated raw diff output", a
   assert.match(text(await read(empty.tool, "teapr://12/diff/1")), /out of range.*0 files/i);
   for (const raw of [
     "not a diff",
-    "diff --git a/x b/x\n",
-    "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n",
+    "diff --git a/x b/x\n--- a/x\n+++ b/x\n",
+    "diff --git a/x b/x\n--- a/x\n+++ b/y\n@@ -1 +1 @@\n-a\n+b\n",
+    "diff --git a/x b/x\nold mode 100644\nnew mode 100755\n@@ -1 +1 @@\n-a\n+b\n",
     "diff --git a/image b/image\nGIT binary patch\n",
-    "diff --git a/image b/image\nGIT binary patch\nliteral 4\nobvious garbage\n\nliteral 0\n\n",
+    "diff --git a/image b/image\nGIT binary patch\nliteral 3\nA00000\n\nliteral 0\n\n",
+    "diff --git a/image b/image\nGIT binary patch\nliteral 8\nPcmZQ@^7Lb5VrBpU1tI|8\n\nliteral 0\n\n",
   ]) {
     const result = await read(load({ stdout: raw }).tool, "teapr://12/diff/all");
     assert.equal(result.isError, true, raw);
@@ -515,7 +517,7 @@ test("decodes quoted Unicode paths and classifies rename, mode, and binary chang
   const rename = "diff --git a/old b/new\nsimilarity index 100%\nrename from old\nrename to new\n";
   const mode = "diff --git a/script b/script\nold mode 100644\nnew mode 100755\n";
   const deleted = "diff --git a/gone b/gone\ndeleted file mode 100644\n--- a/gone\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n";
-  const binary = "diff --git a/image b/image\nGIT binary patch\nliteral 3\nA00000\n\nliteral 0\n\n";
+  const binary = "diff --git a/image b/image\nGIT binary patch\nliteral 8\nPcmZQ@^7Lb5VrBpU1tI|8\n\nliteral 0\nHcmV?d00001\n\n";
   const differ = "diff --git a/other-image b/other-image\nBinary files a/other-image and b/other-image differ\n";
   const raw = [quoted, rename, mode, deleted, binary, differ].join("");
   const { tool } = load({ stdout: raw });
@@ -552,5 +554,17 @@ test("parses mixed quoted and unquoted Git header paths", async () => {
   const result = await read(load({ stdout: `${forward}${reverse}` }).tool, "teapr://15/diff");
   assert.ok(text(result).includes("1. renamed: unicodeé (from ascii old) (+0 -0)"), text(result));
   assert.ok(text(result).includes(`2. renamed: ascii-new (from quoted${String.fromCharCode(7)}-name) (+0 -0)`));
+});
+test("accepts quoted file headers with Git's trailing tab and preserves unquoted paths with spaces", async () => {
+  const quoted = "diff --git \"a/space é \\\"quote\\\".txt\" \"b/space é \\\"quote\\\".txt\"\n" +
+    "new file mode 100644\n--- /dev/null\n+++ \"b/space é \\\"quote\\\".txt\"\t\n@@ -0,0 +1,1 @@\n+content\n";
+  const metadataOnly = "diff --git a/foo b/bar b/foo b/bar\nold mode 100644\nnew mode 100755\n";
+  const binary = "diff --git a/foo b/bar b/foo b/bar\nBinary files a/foo b/bar and b/foo b/bar differ\n";
+  const differingPaths = "diff --git a/foo b/old b/new b/path\nBinary files a/foo b/old and b/new b/path differ\n";
+  const listing = text(await read(load({ stdout: `${quoted}${metadataOnly}${binary}${differingPaths}` }).tool, "teapr://12/diff"));
+  assert.match(listing, /1\. added: space é "quote"\.txt/);
+  assert.match(listing, /2\. modified: foo b\/bar/);
+  assert.match(listing, /3\. binary: foo b\/bar/);
+  assert.match(listing, /4\. binary: new b\/path/);
 });
 
